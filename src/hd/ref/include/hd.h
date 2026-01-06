@@ -310,10 +310,10 @@ void double_couple_jac_point_iter(theta_couple_jac_point_t *out,
                                   const theta_couple_jac_point_t *in,
                                   const theta_couple_curve_t *E1E2);
 
-void double_couple_jac_point_iter_vec(theta_couple_jac_point_t *out,
-                                  unsigned n,
-                                  const theta_couple_jac_point_t *in,
-                                  const theta_couple_curve_t *E1E2);
+void double_couple_jac_point_iter_vec(uint32x4_t *out1, uint32x4_t *out2,
+                        unsigned n,
+                        const uint32x4_t *jac1, const uint32x4_t *jac2,
+                        const uint32x4_t *E1, const uint32x4_t *E2);
 
 /**
  * @brief A forgetful function which returns (X : Z) points given a pair of (X : Y : Z) points
@@ -610,31 +610,36 @@ void itranspose(theta_point_t *Out, uint32x4_t *In){
 }
 
 static inline void 
-transpose_matrix(uint32x4_t (*Out)[18], const basis_change_matrix_t* In){
+transpose_matrix_with_R2(uint32x4_t (*Out)[18], const basis_change_matrix_t* In){
     theta_point_t tp;
+    fp_t mb261  = {1638, 0, 0, 0, 35184372088832};  //R2 = 2^261
 
     tp.x = In->m[0][0];
     tp.y = In->m[1][0];
     tp.z = In->m[2][0];
     tp.t = In->m[3][0];
+    theta_montback(&tp, &mb261);
     transpose(Out[0], tp);
 
     tp.x = In->m[0][1];
     tp.y = In->m[1][1];
     tp.z = In->m[2][1];
     tp.t = In->m[3][1];
+    theta_montback(&tp, &mb261);
     transpose(Out[1], tp);
 
     tp.x = In->m[0][2];
     tp.y = In->m[1][2];
     tp.z = In->m[2][2];
     tp.t = In->m[3][2];
+    theta_montback(&tp, &mb261);
     transpose(Out[2], tp);
 
     tp.x = In->m[0][3];
     tp.y = In->m[1][3];
     tp.z = In->m[2][3];
     tp.t = In->m[3][3];
+    theta_montback(&tp, &mb261);
     transpose(Out[3], tp);
 }
 
