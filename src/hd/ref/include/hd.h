@@ -447,8 +447,8 @@ static inline void u32_montback(uint32x4_t* a, uint32x4_t* mb){
     fp_mul_batched((uint32x2_t*)(a+9), a+9, mb);
 }
 
-static 
-inline void transpose(uint32x4_t *Out, theta_point_t In){
+static inline 
+void transpose(uint32x4_t *Out, theta_point_t In){
     uint64_t mask = ((uint64_t)1<<29)-1;
     uint32_t in32[4][18] = {0};
 
@@ -609,36 +609,76 @@ void itranspose(theta_point_t *Out, uint32x4_t *In){
     Out->t.im[4] = mask & (((uint64_t)in32[3][16]>>1) + ((uint64_t)in32[3][17]<<28));
 }
 
+static inline
+void ec_curve_to_vec32(uint32x4_t *Out, const ec_curve_t E){
+    fp_t mb261  = {1638, 0, 0, 0, 35184372088832};  //R2 = 2^261
+    theta_point_t tp;
+
+    tp.x = E.A;
+    tp.y = E.C;
+    tp.z = E.A24.x;
+    tp.t = E.A24.z;
+    theta_montback(&tp, &mb261);
+    transpose(Out, tp);
+}
+
+static inline
+void jac_point_to_vec32(uint32x4_t *Out, const jac_point_t J){
+    fp_t mb261  = {1638, 0, 0, 0, 35184372088832};  //R2 = 2^261
+    theta_point_t tp;
+
+    tp.x = J.x;
+    tp.y = J.y;
+    tp.z = J.z;
+    fp2_set_zero(&tp.t);
+    theta_montback(&tp, &mb261);
+    transpose(Out, tp);
+}
+
+static inline
+void theta_point_to_vec32(uint32x4_t *Out, const theta_point_t T){
+    fp_t mb261  = {1638, 0, 0, 0, 35184372088832};  //R2 = 2^261
+    theta_point_t tp;
+
+    tp.x = T.x;
+    tp.y = T.y;
+    tp.z = T.z;
+    tp.t = T.t;
+    theta_montback(&tp, &mb261);
+    transpose(Out, tp);
+}
+
+
 static inline void 
-transpose_matrix_with_R2(uint32x4_t (*Out)[18], const basis_change_matrix_t* In){
+transpose_matrix_with_R2(uint32x4_t (*Out)[18], const basis_change_matrix_t In){
     theta_point_t tp;
     fp_t mb261  = {1638, 0, 0, 0, 35184372088832};  //R2 = 2^261
 
-    tp.x = In->m[0][0];
-    tp.y = In->m[1][0];
-    tp.z = In->m[2][0];
-    tp.t = In->m[3][0];
+    tp.x = In.m[0][0];
+    tp.y = In.m[1][0];
+    tp.z = In.m[2][0];
+    tp.t = In.m[3][0];
     theta_montback(&tp, &mb261);
     transpose(Out[0], tp);
 
-    tp.x = In->m[0][1];
-    tp.y = In->m[1][1];
-    tp.z = In->m[2][1];
-    tp.t = In->m[3][1];
+    tp.x = In.m[0][1];
+    tp.y = In.m[1][1];
+    tp.z = In.m[2][1];
+    tp.t = In.m[3][1];
     theta_montback(&tp, &mb261);
     transpose(Out[1], tp);
 
-    tp.x = In->m[0][2];
-    tp.y = In->m[1][2];
-    tp.z = In->m[2][2];
-    tp.t = In->m[3][2];
+    tp.x = In.m[0][2];
+    tp.y = In.m[1][2];
+    tp.z = In.m[2][2];
+    tp.t = In.m[3][2];
     theta_montback(&tp, &mb261);
     transpose(Out[2], tp);
 
-    tp.x = In->m[0][3];
-    tp.y = In->m[1][3];
-    tp.z = In->m[2][3];
-    tp.t = In->m[3][3];
+    tp.x = In.m[0][3];
+    tp.y = In.m[1][3];
+    tp.z = In.m[2][3];
+    tp.t = In.m[3][3];
     theta_montback(&tp, &mb261);
     transpose(Out[3], tp);
 }
