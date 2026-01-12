@@ -5,14 +5,6 @@ This repository is a fork of the SQIsign project. We have introduced several per
 * Vectorized finite field arithmetic for SQIsign NIST security level I on high-performance Arm architectures.
 * Optimized (2,2)-isogeny chain elliptic curve operations based on these vectorized field implementations.
 
-For example, here is our benchmark results on the Cortex-A76.
-
-| Algorithm | Ref | VRef | Improvement |
-|--------------|--------:|--------:|--------:|
-| KeyGen  |  72.366M |  47.571M| **1.52x**|
-| Sign    | 164.324M | 109.896M| **1.49x**|
-| Vefify  |  13.735M |   9.267M| **1.48x**|
-
 ## How to build and replicate our result
 ```
 $ mkdir -p build
