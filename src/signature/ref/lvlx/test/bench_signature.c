@@ -104,12 +104,11 @@ bench_sqisign(uint64_t bench)
     }
     t1 = rdtsc();
     ms = (1000. * (float)(clock() - t) / CLOCKS_PER_SEC);
-    printf("\x1b[34mAvg P_com: %'" PRIu64 " cycles\x1b[0m\n", (ttime[0]) / bench);
-    printf("\x1b[34mAvg P_chl: %'" PRIu64 " cycles\x1b[0m\n", (ttime[1]) / bench);
-    printf("\x1b[34mAvg P_rsp: %'" PRIu64 " cycles\x1b[0m\n", (ttime[2]) / bench);
-    // printf("\x1b[34mAvg P_othr: %'" PRIu64 " cycles\x1b[0m\n", (ttime[4]) / bench);
-    // printf("\x1b[34mAvg P_rign: %'" PRIu64 " cycles\x1b[0m\n", (ttime[5]) / bench);
-    printf("\x1b[34mAvg P_bas: %'" PRIu64 " cycles\x1b[0m\n", (ttime[3]) / bench);
+    // printf("\x1b[34mAvg P_com: %'" PRIu64 " cycles\x1b[0m\n", (ttime[0]) / bench);
+    // printf("\x1b[34mAvg P_chl: %'" PRIu64 " cycles\x1b[0m\n", (ttime[1]) / bench);
+    // printf("\x1b[34mAvg P_rsp: %'" PRIu64 " cycles\x1b[0m\n", (ttime[2]) / bench);
+    // printf("\x1b[34mAvg P_bas: %'" PRIu64 " cycles\x1b[0m\n", (ttime[3]) / bench);
+
     printf("Average signature time [%.2f ms]\n", (float)(ms / bench));
     printf("\x1b[34mAvg signature: %'" PRIu64 " cycles\x1b[0m\n", (t1 - t0) / bench);
 
@@ -180,8 +179,8 @@ main(int argc, char *argv[])
         randombytes_select((unsigned char *)seed, sizeof(seed));
     }
 
-    
-    // uint32_t set[12] = {0x251232ae, 0x62691003, 0x9e2ac698, 0x02d25840, 0x5a2394de, 0x2a0823ef, 0xdb2adbba, 0xd1fb9ee8, 0xedcf991f, 0xddc6097e, 0x66db17c4, 0x9fe2b894};
+    //Here we can set the same seed for benchmarking.
+    // uint32_t set[12] = { 0x97026fa2, 0x004d92cc, 0x260c0b94, 0xb7280ee1, 0x24d75b4d, 0x9fbf8362, 0x11563bc1, 0x1f3194f8, 0xa7ace949, 0x31b7c6e7, 0x077e70ab, 0x61c78c32 };
     // for (int i=0; i<12; i++){
     //     seed[i] = set[i];
     // }

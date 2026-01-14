@@ -270,7 +270,6 @@ int dim2id2iso_ideal_to_isogeny_clapotis(quat_alg_elem_t *beta1,
  * This is a wrapper around the ideal to isogeny clapotis function
  */
 int dim2id2iso_arbitrary_isogeny_evaluation(ec_basis_t *basis, ec_curve_t *codomain, const quat_left_ideal_t *lideal);
-
 /** @}
  */
 
