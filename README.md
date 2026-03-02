@@ -11,7 +11,7 @@ For example, here is our benchmark results for the Cortex-A76.
 |--------------|--------:|--------:|--------:|
 | KeyGen  |  72.366M |  47.571M| **1.52x**|
 | Sign    | 164.324M | 109.896M| **1.49x**|
-| Vefify  |  13.735M |   9.267M| **1.48x**|
+| Verify  |  13.735M |   9.267M| **1.48x**|
 
 ## How to build and replicate our result
 ```
