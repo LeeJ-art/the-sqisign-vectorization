@@ -1,0 +1,2826 @@
+#include "theta_isogenies.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include <assert.h>
+#include <tools.h>
+#include <rng.h>
+
+#include <stdio.h>
+#include <bench.h>
+#include <arm_neon.h>
+#include <hd.h>
+
+static __inline__ uint64_t
+rdtsc(void)
+{
+    return (uint64_t)cpucycles();
+}
+
+// Select a base change matrix in constant time, with M1 a regular
+// base change matrix and M2 a precomputed base change matrix
+// If option = 0 then M <- M1, else if option = 0xFF...FF then M <- M2
+static inline void
+select_base_change_matrix(basis_change_matrix_t *M,
+                          const basis_change_matrix_t *M1,
+                          const precomp_basis_change_matrix_t *M2,
+                          const uint32_t option)
+{
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            fp2_select(&M->m[i][j], &M1->m[i][j], &FP2_CONSTANTS[M2->m[i][j]], option);
+}
+
+// Set a regular base change matrix from a precomputed one
+static inline void
+set_base_change_matrix_from_precomp(basis_change_matrix_t *res, const precomp_basis_change_matrix_t *M)
+{
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            res->m[i][j] = FP2_CONSTANTS[M->m[i][j]];
+}
+
+static inline void
+choose_index_theta_point(fp2_t *res, int ind, const theta_point_t *T)
+{
+    const fp2_t *src = NULL;
+    switch (ind % 4) {
+        case 0:
+            src = &T->x;
+            break;
+        case 1:
+            src = &T->y;
+            break;
+        case 2:
+            src = &T->z;
+            break;
+        case 3:
+            src = &T->t;
+            break;
+        default:
+            assert(0);
+    }
+    fp2_copy(res, src);
+}
+
+// same as apply_isomorphism method but more efficient when the t component of P is zero.
+static void
+apply_isomorphism_general(theta_point_t *res,
+                          const basis_change_matrix_t *M,
+                          const theta_point_t *P,
+                          const bool Pt_not_zero)
+{
+    fp2_t x1;
+    theta_point_t temp;
+    //matrix multiplication
+    fp2_mul(&temp.x, &P->x, &M->m[0][0]);
+    fp2_mul(&x1, &P->y, &M->m[0][1]);
+    fp2_add(&temp.x, &temp.x, &x1);
+    fp2_mul(&x1, &P->z, &M->m[0][2]);
+    fp2_add(&temp.x, &temp.x, &x1);
+
+    fp2_mul(&temp.y, &P->x, &M->m[1][0]);
+    fp2_mul(&x1, &P->y, &M->m[1][1]);
+    fp2_add(&temp.y, &temp.y, &x1);
+    fp2_mul(&x1, &P->z, &M->m[1][2]);
+    fp2_add(&temp.y, &temp.y, &x1);
+
+    fp2_mul(&temp.z, &P->x, &M->m[2][0]);
+    fp2_mul(&x1, &P->y, &M->m[2][1]);
+    fp2_add(&temp.z, &temp.z, &x1);
+    fp2_mul(&x1, &P->z, &M->m[2][2]);
+    fp2_add(&temp.z, &temp.z, &x1);
+
+    fp2_mul(&temp.t, &P->x, &M->m[3][0]);
+    fp2_mul(&x1, &P->y, &M->m[3][1]);
+    fp2_add(&temp.t, &temp.t, &x1);
+    fp2_mul(&x1, &P->z, &M->m[3][2]);
+    fp2_add(&temp.t, &temp.t, &x1);
+
+    if (Pt_not_zero) {
+        fp2_mul(&x1, &P->t, &M->m[0][3]);
+        fp2_add(&temp.x, &temp.x, &x1);
+
+        fp2_mul(&x1, &P->t, &M->m[1][3]);
+        fp2_add(&temp.y, &temp.y, &x1);
+
+        fp2_mul(&x1, &P->t, &M->m[2][3]);
+        fp2_add(&temp.z, &temp.z, &x1);
+
+        fp2_mul(&x1, &P->t, &M->m[3][3]);
+        fp2_add(&temp.t, &temp.t, &x1);
+    }
+
+    fp2_copy(&res->x, &temp.x);
+    fp2_copy(&res->y, &temp.y);
+    fp2_copy(&res->z, &temp.z);
+    fp2_copy(&res->t, &temp.t);
+}
+
+
+//True
+static inline void 
+apply_isomorphism_vec_1(uint32x4_t* out, uint32x4_t (*mm)[FP2_LIMBS], uint32x4_t *ax){
+    uint32x4_t tmp[FP2_LIMBS], res[FP2_LIMBS];
+    
+    for (int i=0; i<FP2_LIMBS; i++) tmp[i] = vdupq_laneq_u32(ax[i], 0);
+    fp2_mul_batched(res, mm[0], tmp);
+
+    for (int i=0; i<FP2_LIMBS; i++) tmp[i] = vdupq_laneq_u32(ax[i], 1);
+    fp2_mul_batched(tmp, mm[1], tmp);
+    fp2_add_batched(res, res, tmp);
+
+    for (int i=0; i<FP2_LIMBS; i++) tmp[i] = vdupq_laneq_u32(ax[i], 2);
+    fp2_mul_batched(tmp, mm[2], tmp);
+    fp2_add_batched(res, res, tmp);
+
+    for (int i=0; i<FP2_LIMBS; i++) tmp[i] = vdupq_laneq_u32(ax[i], 3);
+    fp2_mul_batched(tmp, mm[3], tmp);
+    fp2_add_batched(res, res, tmp);
+
+    // reduce
+    fp2_bactched_reduction(res);
+
+    memmove(out, res, sizeof(uint32x4_t)*FP2_LIMBS);
+}
+
+//False
+static inline void 
+apply_isomorphism_vec_2(uint32x4_t* res, uint32x4_t (*mm)[FP2_LIMBS], uint32x4_t *ax){
+    uint32x4_t tmp[FP2_LIMBS];
+    
+    for (int i=0; i<FP2_LIMBS; i++) tmp[i] = vdupq_laneq_u32(ax[i], 0);
+    fp2_mul_batched(res, mm[0], tmp);
+
+    for (int i=0; i<FP2_LIMBS; i++) tmp[i] = vdupq_laneq_u32(ax[i], 1);
+    fp2_mul_batched(tmp, mm[1], tmp);
+    fp2_add_batched(res, res, tmp);
+
+    for (int i=0; i<FP2_LIMBS; i++) tmp[i] = vdupq_laneq_u32(ax[i], 2);
+    fp2_mul_batched(tmp, mm[2], tmp);
+    fp2_add_batched(res, res, tmp);
+
+    // reduce
+    fp2_bactched_reduction(res);
+}
+
+static void
+apply_isomorphism(theta_point_t *res, const basis_change_matrix_t *M, const theta_point_t *P)
+{
+    apply_isomorphism_general(res, M, P, true);
+}
+
+// set res = M1 * M2 with matrix multiplication
+static void
+base_change_matrix_multiplication(basis_change_matrix_t *res,
+                                  const basis_change_matrix_t *M1,
+                                  const basis_change_matrix_t *M2)
+{
+    basis_change_matrix_t tmp;
+    fp2_t sum, m_ik, m_kj;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            fp2_set_zero(&sum);
+            for (int k = 0; k < 4; k++) {
+                m_ik = M1->m[i][k];
+                m_kj = M2->m[k][j];
+                fp2_mul(&m_ik, &m_ik, &m_kj);
+                fp2_add(&sum, &sum, &m_ik);
+            }
+            tmp.m[i][j] = sum;
+        }
+    }
+    *res = tmp;
+}
+
+// compute the theta_point corresponding to the couple of point T on an elliptic product
+static void
+base_change(theta_point_t *out, const theta_gluing_t *phi, const theta_couple_point_t *T)
+{
+    theta_point_t null_point;
+
+    // null_point = (a : b : c : d)
+    // a = P1.x P2.x, b = P1.x P2.z, c = P1.z P2.x, d = P1.z P2.z
+    /* matrix mul */
+    fp2_mul(&null_point.x, &T->P1.x, &T->P2.x);
+    fp2_mul(&null_point.y, &T->P1.x, &T->P2.z);
+    fp2_mul(&null_point.z, &T->P2.x, &T->P1.z);
+    fp2_mul(&null_point.t, &T->P1.z, &T->P2.z);
+
+    // Apply the basis change
+    apply_isomorphism(out, &phi->M, &null_point);
+}
+
+static inline void 
+base_change_vec(uint32x4_t *out, const theta_couple_point_t *T, uint32x4_t (*mm)[FP2_LIMBS])
+{
+    // null_point = (a : b : c : d)
+    // a = P1.x P2.x, b = P1.x P2.z, c = P1.z P2.x, d = P1.z P2.z
+    //matrix mul
+    theta_point_t tp;
+    uint32x4_t p1[FP2_LIMBS], p2[FP2_LIMBS];
+    tp.x = T->P1.x;
+    tp.y = T->P1.x;
+    tp.z = T->P1.z;
+    tp.t = T->P1.z;
+    transpose(p1, tp);
+    tp.x = T->P2.x;
+    tp.y = T->P2.z;
+    tp.z = T->P2.x;
+    tp.t = T->P2.z;
+    transpose(p2, tp);
+    fp2_mul_batched(p1, p1, p2);
+
+    // Apply the basis change
+    apply_isomorphism_vec_1(out, mm, p1);
+}
+
+static void
+action_by_translation_z_and_det(fp2_t *z_inv, fp2_t *det_inv, const ec_point_t *P4, const ec_point_t *P2)
+{
+    // Store the Z-coordinate to invert
+    fp2_copy(z_inv, &P4->z);
+
+    // Then collect detij = xij wij - uij zij
+    fp2_t tmp;
+    fp2_mul(det_inv, &P4->x, &P2->z);
+    fp2_mul(&tmp, &P4->z, &P2->x);
+    fp2_sub(det_inv, det_inv, &tmp);
+}
+
+static void
+action_by_translation_compute_matrix(translation_matrix_t *G,
+                                     const ec_point_t *P4,
+                                     const ec_point_t *P2,
+                                     const fp2_t *z_inv,
+                                     const fp2_t *det_inv)
+{
+    fp2_t tmp;
+
+    // Gi.g10 = uij xij /detij - xij/zij
+    fp2_mul(&tmp, &P4->x, z_inv);
+    fp2_mul(&G->g10, &P4->x, &P2->x); /* sequential mul */
+    fp2_mul(&G->g10, &G->g10, det_inv);
+    fp2_sub(&G->g10, &G->g10, &tmp);
+
+    // Gi.g11 = uij zij * detij
+    fp2_mul(&G->g11, &P2->x, det_inv);
+    fp2_mul(&G->g11, &G->g11, &P4->z);
+
+    // Gi.g00 = -Gi.g11
+    fp2_neg(&G->g00, &G->g11);
+
+    // Gi.g01 = - wij zij detij
+    fp2_mul(&G->g01, &P2->z, det_inv);
+    fp2_mul(&G->g01, &G->g01, &P4->z);
+    fp2_neg(&G->g01, &G->g01);
+}
+
+// Returns 1 if the basis is as expected and 0 otherwise
+// We only expect this to fail for malformed signatures, so
+// do not require this to run in constant time.
+static int
+verify_two_torsion(const theta_couple_point_t *K1_2, const theta_couple_point_t *K2_2, const theta_couple_curve_t *E12)
+{
+    // First check if any point in K1_2 or K2_2 is zero, if they are then the points did not have
+    // order 8 when we started gluing
+    if (ec_is_zero(&K1_2->P1) | ec_is_zero(&K1_2->P2) | ec_is_zero(&K2_2->P1) | ec_is_zero(&K2_2->P2)) {
+        return 0;
+    }
+
+    // Now ensure that P1, Q1 and P2, Q2 are independent. For points of order two this means
+    // that they're not the same
+    if (ec_is_equal(&K1_2->P1, &K2_2->P1) | ec_is_equal(&K1_2->P2, &K2_2->P2)) {
+        return 0;
+    }
+
+    // Finally, double points to ensure all points have order exactly 0
+    theta_couple_point_t O1, O2;
+    double_couple_point(&O1, K1_2, E12);
+    double_couple_point(&O2, K2_2, E12);
+    // If this check fails then the points had order 2*f for some f, and the kernel is malformed.
+    if (!(ec_is_zero(&O1.P1) & ec_is_zero(&O1.P2) & ec_is_zero(&O2.P1) & ec_is_zero(&O2.P2))) {
+        return 0;
+    }
+
+    return 1;
+}
+
+// Computes the action by translation for four points
+// (P1, P2) and (Q1, Q2) on E1 x E2 simultaneously to
+// save on inversions.
+// Returns 0 if any of Pi or Qi does not have order 2
+// and 1 otherwise
+static int
+action_by_translation(translation_matrix_t *Gi,
+                      const theta_couple_point_t *K1_4,
+                      const theta_couple_point_t *K2_4,
+                      const theta_couple_curve_t *E12)
+{
+    // Compute points of order 2 from Ki_4
+    theta_couple_point_t K1_2, K2_2;
+    double_couple_point(&K1_2, K1_4, E12);
+    double_couple_point(&K2_2, K2_4, E12);
+
+    if (!verify_two_torsion(&K1_2, &K2_2, E12)) {
+        return 0;
+    }
+
+    // We need to invert four Z coordinates and
+    // four determinants which we do with batched
+    // inversion
+    fp2_t inverses[8];
+    action_by_translation_z_and_det(&inverses[0], &inverses[4], &K1_4->P1, &K1_2.P1);
+    action_by_translation_z_and_det(&inverses[1], &inverses[5], &K1_4->P2, &K1_2.P2);
+    action_by_translation_z_and_det(&inverses[2], &inverses[6], &K2_4->P1, &K2_2.P1);
+    action_by_translation_z_and_det(&inverses[3], &inverses[7], &K2_4->P2, &K2_2.P2);
+
+    fp2_batched_inv(inverses, 8);
+    if (fp2_is_zero(&inverses[0]))
+        return 0; // something was wrong with our input (which somehow was not caught by
+                  // verify_two_torsion)
+
+    action_by_translation_compute_matrix(&Gi[0], &K1_4->P1, &K1_2.P1, &inverses[0], &inverses[4]);
+    action_by_translation_compute_matrix(&Gi[1], &K1_4->P2, &K1_2.P2, &inverses[1], &inverses[5]);
+    action_by_translation_compute_matrix(&Gi[2], &K2_4->P1, &K2_2.P1, &inverses[2], &inverses[6]);
+    action_by_translation_compute_matrix(&Gi[3], &K2_4->P2, &K2_2.P2, &inverses[3], &inverses[7]);
+
+    return 1;
+}
+
+// Given the appropriate four torsion, computes the
+// change of basis to compute the correct theta null
+// point.
+// Returns 0 if the order of K1_4 or K2_4 is not 4
+static int
+gluing_change_of_basis(basis_change_matrix_t *M,
+                       const theta_couple_point_t *K1_4,
+                       const theta_couple_point_t *K2_4,
+                       const theta_couple_curve_t *E12)
+{
+    // Compute the four 2x2 matrices for the action by translation
+    // on the four points:
+    translation_matrix_t Gi[4];
+    if (!action_by_translation(Gi, K1_4, K2_4, E12))
+        return 0;
+
+    // Computation of the 4x4 matrix from Mij
+    // t001, t101 (resp t002, t102) first column of M11 * M21 (resp M12 * M22)
+    fp2_t t001, t101, t002, t102, tmp;
+
+    fp2_mul(&t001, &Gi[0].g00, &Gi[2].g00);
+    fp2_mul(&tmp, &Gi[0].g01, &Gi[2].g10);
+    fp2_add(&t001, &t001, &tmp);
+
+    fp2_mul(&t101, &Gi[0].g10, &Gi[2].g00);
+    fp2_mul(&tmp, &Gi[0].g11, &Gi[2].g10);
+    fp2_add(&t101, &t101, &tmp);
+
+    fp2_mul(&t002, &Gi[1].g00, &Gi[3].g00);
+    fp2_mul(&tmp, &Gi[1].g01, &Gi[3].g10);
+    fp2_add(&t002, &t002, &tmp);
+
+    fp2_mul(&t102, &Gi[1].g10, &Gi[3].g00);
+    fp2_mul(&tmp, &Gi[1].g11, &Gi[3].g10);
+    fp2_add(&t102, &t102, &tmp);
+
+    // trace for the first row
+    fp2_set_one(&M->m[0][0]);
+    fp2_mul(&tmp, &t001, &t002);
+    fp2_add(&M->m[0][0], &M->m[0][0], &tmp);
+    fp2_mul(&tmp, &Gi[2].g00, &Gi[3].g00);
+    fp2_add(&M->m[0][0], &M->m[0][0], &tmp);
+    fp2_mul(&tmp, &Gi[0].g00, &Gi[1].g00);
+    fp2_add(&M->m[0][0], &M->m[0][0], &tmp);
+
+    fp2_mul(&M->m[0][1], &t001, &t102);
+    fp2_mul(&tmp, &Gi[2].g00, &Gi[3].g10);
+    fp2_add(&M->m[0][1], &M->m[0][1], &tmp);
+    fp2_mul(&tmp, &Gi[0].g00, &Gi[1].g10);
+    fp2_add(&M->m[0][1], &M->m[0][1], &tmp);
+
+    fp2_mul(&M->m[0][2], &t101, &t002);
+    fp2_mul(&tmp, &Gi[2].g10, &Gi[3].g00);
+    fp2_add(&M->m[0][2], &M->m[0][2], &tmp);
+    fp2_mul(&tmp, &Gi[0].g10, &Gi[1].g00);
+    fp2_add(&M->m[0][2], &M->m[0][2], &tmp);
+
+    fp2_mul(&M->m[0][3], &t101, &t102);
+    fp2_mul(&tmp, &Gi[2].g10, &Gi[3].g10);
+    fp2_add(&M->m[0][3], &M->m[0][3], &tmp);
+    fp2_mul(&tmp, &Gi[0].g10, &Gi[1].g10);
+    fp2_add(&M->m[0][3], &M->m[0][3], &tmp);
+
+    // Compute the action of (0,out.K2_4.P2) for the second row
+    fp2_mul(&tmp, &Gi[3].g01, &M->m[0][1]);
+    fp2_mul(&M->m[1][0], &Gi[3].g00, &M->m[0][0]);
+    fp2_add(&M->m[1][0], &M->m[1][0], &tmp);
+
+    fp2_mul(&tmp, &Gi[3].g11, &M->m[0][1]);
+    fp2_mul(&M->m[1][1], &Gi[3].g10, &M->m[0][0]);
+    fp2_add(&M->m[1][1], &M->m[1][1], &tmp);
+
+    fp2_mul(&tmp, &Gi[3].g01, &M->m[0][3]);
+    fp2_mul(&M->m[1][2], &Gi[3].g00, &M->m[0][2]);
+    fp2_add(&M->m[1][2], &M->m[1][2], &tmp);
+
+    fp2_mul(&tmp, &Gi[3].g11, &M->m[0][3]);
+    fp2_mul(&M->m[1][3], &Gi[3].g10, &M->m[0][2]);
+    fp2_add(&M->m[1][3], &M->m[1][3], &tmp);
+
+    // compute the action of (K1_4.P1,0) for the third row
+    fp2_mul(&tmp, &Gi[0].g01, &M->m[0][2]);
+    fp2_mul(&M->m[2][0], &Gi[0].g00, &M->m[0][0]);
+    fp2_add(&M->m[2][0], &M->m[2][0], &tmp);
+
+    fp2_mul(&tmp, &Gi[0].g01, &M->m[0][3]);
+    fp2_mul(&M->m[2][1], &Gi[0].g00, &M->m[0][1]);
+    fp2_add(&M->m[2][1], &M->m[2][1], &tmp);
+
+    fp2_mul(&tmp, &Gi[0].g11, &M->m[0][2]);
+    fp2_mul(&M->m[2][2], &Gi[0].g10, &M->m[0][0]);
+    fp2_add(&M->m[2][2], &M->m[2][2], &tmp);
+
+    fp2_mul(&tmp, &Gi[0].g11, &M->m[0][3]);
+    fp2_mul(&M->m[2][3], &Gi[0].g10, &M->m[0][1]);
+    fp2_add(&M->m[2][3], &M->m[2][3], &tmp);
+
+    // compute the action of (K1_4.P1,K2_4.P2) for the final row
+    fp2_mul(&tmp, &Gi[0].g01, &M->m[1][2]);
+    fp2_mul(&M->m[3][0], &Gi[0].g00, &M->m[1][0]);
+    fp2_add(&M->m[3][0], &M->m[3][0], &tmp);
+
+    fp2_mul(&tmp, &Gi[0].g01, &M->m[1][3]);
+    fp2_mul(&M->m[3][1], &Gi[0].g00, &M->m[1][1]);
+    fp2_add(&M->m[3][1], &M->m[3][1], &tmp);
+
+    fp2_mul(&tmp, &Gi[0].g11, &M->m[1][2]);
+    fp2_mul(&M->m[3][2], &Gi[0].g10, &M->m[1][0]);
+    fp2_add(&M->m[3][2], &M->m[3][2], &tmp);
+
+    fp2_mul(&tmp, &Gi[0].g11, &M->m[1][3]);
+    fp2_mul(&M->m[3][3], &Gi[0].g10, &M->m[1][1]);
+    fp2_add(&M->m[3][3], &M->m[3][3], &tmp);
+
+    return 1;
+}
+
+/**
+ * @brief Compute the gluing isogeny from an elliptic product
+ *
+ * @param out Output: the theta_gluing
+ * @param K1_8 a couple point
+ * @param E12 an elliptic curve product
+ * @param K2_8 a point in E2[8]
+ *
+ * out : E1xE2 -> A of kernel [4](K1_8,K2_8)
+ * if the kernel supplied has the incorrect order, or gluing seems malformed,
+ * returns 0, otherwise returns 1.
+ */
+static int
+gluing_compute(theta_gluing_t *out,
+               const theta_couple_curve_t *E12,
+               const theta_couple_jac_point_t *xyK1_8,
+               const theta_couple_jac_point_t *xyK2_8,
+               bool verify)
+{
+    // Ensure that we have been given the eight torsion
+#ifndef NDEBUG
+    {
+        int check = test_jac_order_twof(&xyK1_8->P1, &E12->E1, 3);
+        if (!check)
+            debug_print("xyK1_8->P1 does not have order 8");
+        check = test_jac_order_twof(&xyK2_8->P1, &E12->E1, 3);
+        if (!check)
+            debug_print("xyK2_8->P1 does not have order 8");
+        check = test_jac_order_twof(&xyK1_8->P2, &E12->E2, 3);
+        if (!check)
+            debug_print("xyK2_8->P1 does not have order 8");
+        check = test_jac_order_twof(&xyK2_8->P2, &E12->E2, 3);
+        if (!check)
+            debug_print("xyK2_8->P2 does not have order 8");
+    }
+#endif
+
+    out->xyK1_8 = *xyK1_8;
+    out->domain = *E12;
+
+    // Given points in E[8] x E[8] we need the four torsion below
+    theta_couple_jac_point_t xyK1_4, xyK2_4;
+
+    double_couple_jac_point(&xyK1_4, xyK1_8, E12);
+    double_couple_jac_point(&xyK2_4, xyK2_8, E12);
+
+    // Convert from (X:Y:Z) coordinates to (X:Z)
+    theta_couple_point_t K1_8, K2_8;
+    theta_couple_point_t K1_4, K2_4;
+
+    couple_jac_to_xz(&K1_8, xyK1_8);
+    couple_jac_to_xz(&K2_8, xyK2_8);
+    couple_jac_to_xz(&K1_4, &xyK1_4);
+    couple_jac_to_xz(&K2_4, &xyK2_4);
+
+    // Set the basis change matrix, if we have not been given a valid K[8] for this computation
+    // gluing_change_of_basis will detect this and return 0
+    if (!gluing_change_of_basis(&out->M, &K1_4, &K2_4, E12)) {
+        debug_print("gluing failed as kernel does not have correct order");
+        return 0;
+    }
+
+    // apply the base change to the kernel
+    theta_point_t TT1, TT2;
+
+    base_change(&TT1, out, &K1_8);
+    base_change(&TT2, out, &K2_8);
+
+    // compute the codomain
+    to_squared_theta(&TT1, &TT1);
+    to_squared_theta(&TT2, &TT2);
+
+    // If the kernel is well formed then TT1.t and TT2.t are zero
+    // if they are not, we exit early as the signature we are validating
+    // is probably malformed
+    if (!(fp2_is_zero(&TT1.t) & fp2_is_zero(&TT2.t))) {
+        debug_print("gluing failed TT1.t or TT2.t is not zero");
+        return 0;
+    }
+    // Test our projective factors are non zero
+    if (fp2_is_zero(&TT1.x) | fp2_is_zero(&TT2.x) | fp2_is_zero(&TT1.y) | fp2_is_zero(&TT2.z) | fp2_is_zero(&TT1.z))
+        return 0; // invalid input
+
+    // Projective factor: Ax
+    fp2_mul(&out->codomain.x, &TT1.x, &TT2.x);
+    fp2_mul(&out->codomain.y, &TT1.y, &TT2.x);
+    fp2_mul(&out->codomain.z, &TT1.x, &TT2.z);
+    fp2_set_zero(&out->codomain.t);
+    // Projective factor: ABCxz
+    fp2_mul(&out->precomputation.x, &TT1.y, &TT2.z);
+    fp2_copy(&out->precomputation.y, &out->codomain.z);
+    fp2_copy(&out->precomputation.z, &out->codomain.y);
+    fp2_set_zero(&out->precomputation.t);
+
+    // Compute the two components of phi(K1_8) = (x:x:y:y).
+    fp2_mul(&out->imageK1_8.x, &TT1.x, &out->precomputation.x);
+    fp2_mul(&out->imageK1_8.y, &TT1.z, &out->precomputation.z);
+
+    // If K1_8 and K2_8 are our 8-torsion points, this ensures that the
+    // 4-torsion points [2]K1_8 and [2]K2_8 are isotropic.
+    if (verify) {
+        fp2_t t1, t2;
+        fp2_mul(&t1, &TT1.y, &out->precomputation.y);
+        if (!fp2_is_equal(&out->imageK1_8.x, &t1))
+            return 0;
+        fp2_mul(&t1, &TT2.x, &out->precomputation.x);
+        fp2_mul(&t2, &TT2.z, &out->precomputation.z);
+        if (!fp2_is_equal(&t2, &t1))
+            return 0;
+    }
+
+    // compute the final codomain
+    hadamard(&out->codomain, &out->codomain);
+    return 1;
+}
+
+// sub routine of the gluing eval
+static void
+gluing_eval_point(theta_point_t *image, const theta_couple_jac_point_t *P, const theta_gluing_t *phi)
+{
+    theta_point_t T1, T2;
+    add_components_t add_comp1, add_comp2;
+
+    // Compute the cross addition components of P1+Q1 and P2+Q2
+    jac_to_xz_add_components(&add_comp1, &P->P1, &phi->xyK1_8.P1, &phi->domain.E1);
+    jac_to_xz_add_components(&add_comp2, &P->P2, &phi->xyK1_8.P2, &phi->domain.E2);
+
+    // Compute T1 and T2 derived from the cross addition components.
+    fp2_mul(&T1.x, &add_comp1.u, &add_comp2.u); // T1x = u1u2
+    fp2_mul(&T2.t, &add_comp1.v, &add_comp2.v); // T2t = v1v2
+    fp2_add(&T1.x, &T1.x, &T2.t);               // T1x = u1u2 + v1v2
+    fp2_mul(&T1.y, &add_comp1.u, &add_comp2.w); // T1y = u1w2
+    fp2_mul(&T1.z, &add_comp1.w, &add_comp2.u); // T1z = w1u2
+    fp2_mul(&T1.t, &add_comp1.w, &add_comp2.w); // T1t = w1w2
+    fp2_add(&T2.x, &add_comp1.u, &add_comp1.v); // T2x = (u1+v1)
+    fp2_add(&T2.y, &add_comp2.u, &add_comp2.v); // T2y = (u2+v2)
+    fp2_mul(&T2.x, &T2.x, &T2.y);               // T2x = (u1+v1)(u2+v2)
+    fp2_sub(&T2.x, &T2.x, &T1.x);               // T1x = v1u2 + u1v2
+    fp2_mul(&T2.y, &add_comp1.v, &add_comp2.w); // T2y = v1w2
+    fp2_mul(&T2.z, &add_comp1.w, &add_comp2.v); // T2z = w1v2
+    fp2_set_zero(&T2.t);                        // T2t = 0
+
+    // Apply the basis change and compute their respective square
+    // theta(P+Q) = M.T1 - M.T2 and theta(P-Q) = M.T1 + M.T2
+    apply_isomorphism_general(&T1, &phi->M, &T1, true);
+    apply_isomorphism_general(&T2, &phi->M, &T2, false);
+    pointwise_square(&T1, &T1);
+    pointwise_square(&T2, &T2);
+
+    // the difference between the two is therefore theta(P+Q)theta(P-Q)
+    // whose hadamard transform is then the product of the dual
+    // theta_points of phi(P) and phi(Q).
+    fp2_sub(&T1.x, &T1.x, &T2.x);
+    fp2_sub(&T1.y, &T1.y, &T2.y);
+    fp2_sub(&T1.z, &T1.z, &T2.z);
+    fp2_sub(&T1.t, &T1.t, &T2.t);
+    hadamard(&T1, &T1);
+
+    // Compute (x, y, z, t)
+    // As imageK1_8 = (x:x:y:y), its inverse is (y:y:x:x).
+    fp2_mul(&image->x, &T1.x, &phi->imageK1_8.y);
+    fp2_mul(&image->y, &T1.y, &phi->imageK1_8.y);
+    fp2_mul(&image->z, &T1.z, &phi->imageK1_8.x);
+    fp2_mul(&image->t, &T1.t, &phi->imageK1_8.x);
+
+    hadamard(image, image);
+}
+
+
+static inline void 
+jac_to_xz_add_components_vec(uint32x4_t* ucomp, uint32x4_t* vcomp, uint32x4_t* wcomp,
+                                const uint32x4_t *xyT1, const uint32x4_t *xyT2,
+                                const uint32x4_t *Phidomain,  const uint32x4_t *PhixyK1_8)
+{
+    // Take P and Q in E distinct, two jac_point_t, return three components u,v and w in Fp2 such
+    // that the xz coordinates of P+Q are (u-v:w) and of P-Q are (u+v:w)
+
+
+    uint32x4_t ax[FP2_LIMBS], az[FP2_LIMBS], tr1[FP2_LIMBS], tr2[FP2_LIMBS], tr3[FP2_LIMBS], tr4[FP2_LIMBS];
+    uint32x4_t ts0[FP2_LIMBS], ts1[FP2_LIMBS], ts2[FP2_LIMBS], ts3[FP2_LIMBS], ts4[FP2_LIMBS], ts5[FP2_LIMBS];
+    //xyT1 = [P1x, P1y, P1z, non-def, P2x, P2y, P2z, non-def]
+    //xyT2 = [P3x, P3y, P3z, non-def, P4x, P4y, P4z, non-def]
+    //PhixyK1_8 = [Q1x, Q1y, Q1z, non-def, Q2x, Q2y, Q2z, non-def]
+    //Phidomain = [E1A, E1C, E1A24x, E1A24z, E2A, E2C, E2A24x, E2A24z]
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        //tr1 = [Q1z, Q2z, P1z, P2z]
+        tr1[i][0] = PhixyK1_8[i][2];
+        tr1[i][1] = PhixyK1_8[i+FP2_LIMBS][2];
+        tr1[i][2] = xyT1[i][2];
+        tr1[i][3] = xyT1[i+FP2_LIMBS][2];
+        //tr2 = [P3z, P4z, P1x, P2x]
+        tr2[i][0] = xyT2[i][2];
+        tr2[i][1] = xyT2[i+FP2_LIMBS][2];
+        tr2[i][2] = xyT1[i][0];
+        tr2[i][3] = xyT1[i+FP2_LIMBS][0];
+        //tr3 = [P3x, P4x, Q1x, Q2x]
+        tr3[i][0] = xyT2[i][0];
+        tr3[i][1] = xyT2[i+FP2_LIMBS][0];
+        tr3[i][2] = PhixyK1_8[i][0];
+        tr3[i][3] = PhixyK1_8[i+FP2_LIMBS][0];
+        //tr4 = [P3y, P4y, Q1y, Q2y]
+        tr4[i][0] = xyT2[i][1];
+        tr4[i][1] = xyT2[i+FP2_LIMBS][1];
+        tr4[i][2] = PhixyK1_8[i][1];
+        tr4[i][3] = PhixyK1_8[i+FP2_LIMBS][1];
+    }
+
+    // fp2_sqr(&t0, &P1->z);             // t0 = z1^2
+    // fp2_sqr(&T0, &P2->z);             // T0 = Z1^2
+    // fp2_sqr(&s0, &P3->z);             // s0 = z3^2
+    // fp2_sqr(&S0, &P4->z);             // S0 = Z3^2
+    for (int i=0; i<FP2_LIMBS; i++) az[i] = vextq_u32(tr1[i], tr2[i], 2); //[P1z, P2z, P3z, P4z]
+    fp2_sqr_batched(ts0, az); //[t0, T0, s0, S0] = [P1z^2, P2z^2, P3z^2, P4z^2]
+
+    // fp2_sqr(&t1, &Q1->z);             // t1 = z2^2
+    // fp2_sqr(&T1, &Q2->z);             // T1 = Z2^2
+    // fp2_sqr(&s1, &Q1->z);             // s1 = z2^2
+    // fp2_sqr(&S1, &Q2->z);             // S1 = Z2^2
+    for (int i=0; i<FP2_LIMBS; i++) { tr1[i][2] = tr1[i][0]; tr1[i][3] = tr1[i][1];} //[Q1z, Q2z, Q1z, Q2z]
+    fp2_sqr_batched(ts1, tr1); //[t1, T1, s1, S1] = [Q1z^2, Q2z^2, Q1z^2, Q2z^2]
+
+    // fp2_mul(&t2, &P1->x, &t1);        // t2 = x1z2^2
+    // fp2_mul(&T2, &P2->x, &T1);        // T2 = X1Z2^2
+    // fp2_mul(&s2, &P3->x, &s1);        // s2 = x3z2^2
+    // fp2_mul(&S2, &P4->x, &S1);        // S2 = X3Z2^2
+    for (int i=0; i<FP2_LIMBS; i++) ax[i] = vextq_u32(tr2[i], tr3[i], 2); //[P1x, P2x, P3x, P4x]
+    fp2_mul_batched(ts2, ax, ts1); //[t2, T2, s2, S2] = [P1x*Q1z^2, P2x*Q2z^2, P3x*Q1z^2, P4x*Q2z^2]
+    
+    // fp2_mul(&t3, &Q1->x, &t0);        // t3 = x2z1^2
+    // fp2_mul(&T3, &Q2->x, &T0);        // T3 = X2Z1^2
+    // fp2_mul(&s3, &Q1->x, &s0);        // s3 = x2z3^2
+    // fp2_mul(&S3, &Q2->x, &S0);        // S3 = X2Z3^2
+    for (int i=0; i<FP2_LIMBS; i++){ tr3[i][0] = tr3[i][2]; tr3[i][1] = tr3[i][3]; } //[Q1x, Q2x, Q1x, Q2x]
+    fp2_mul_batched(ts3, tr3, ts0); // [t3, T3, s3, S3] = [Q1x*P1z^2, Q2x*P2z^2, Q1x*P3z^2, Q2x*P4z^2]
+
+
+    // fp2_mul(&t4, &P1->y, &Q1->z);      // t4 = y1z2
+    // fp2_mul(&T4, &P2->y, &Q2->z);      // T4 = Y1Z2
+    // fp2_mul(&s4, &P3->y, &Q1->z);      // s4 = y3z2
+    // fp2_mul(&S4, &P4->y, &Q2->z);      // S4 = Y3Z2
+    for (int i=0; i<FP2_LIMBS; i++){       //[AC1A, AC2A, P1y, P2y]
+        tr2[i][0] = Phidomain[i][0];
+        tr2[i][1] = Phidomain[i+FP2_LIMBS][0];
+        tr2[i][2] = xyT1[i][1];
+        tr2[i][3] = xyT1[i+FP2_LIMBS][1];
+    }
+    for (int i=0; i<FP2_LIMBS; i++) ax[i] = vextq_u32(tr2[i], tr4[i], 2); //[Py1, P2y, P3y, P4y]
+    fp2_mul_batched(ts4, ax, tr1); //[t4, T4, s4, S4] = [Py1*Q1z, P2y*Q2z, P3y*Q1z, P4y*Q2z]
+
+
+    // fp2_mul(&t5, &P1->z, &Q1->y);      // t5 = z1y2
+    // fp2_mul(&T5, &P2->z, &Q2->y);      // T5 = Z1Y2
+    // fp2_mul(&s5, &P3->z, &Q1->y);      // s5 = z3y2
+    // fp2_mul(&S5, &P4->z, &Q2->y);      // S5 = Z3Y2
+    for (int i=0; i<FP2_LIMBS; i++){ tr4[i][0] = tr4[i][2]; tr4[i][1] = tr4[i][3]; } //[Q1y, Q2y, Q1y, Q2y]
+    fp2_mul_batched(ts5, az, tr4); //[t5, T5, s5, S5] = [P1z*Q1y, P2z*Q2y, P3z*Q1y, P4z*Q2y]
+
+
+    // fp2_mul(&t5, &t5, &t0);          // t5 = z1^3y2
+    // fp2_mul(&T5, &T5, &T0);          // T5 = Z1^3Y2
+    // fp2_mul(&s5, &s5, &s0);          // s5 = z3^3y2
+    // fp2_mul(&S5, &S5, &S0);          // S5 = Z3^3Y2
+    fp2_mul_batched(ts5, ts5, ts0);     // [t5, T5, s5, S5] = [t5, T5, s5, S5] * [t0, T0, s0, S0]
+    // fp2_mul(&t4, &t4, &t1);          // t4 = y1z2^3
+    // fp2_mul(&T4, &T4, &T1);          // T4 = Y1Z2^3
+    // fp2_mul(&s4, &s4, &s1);          // s4 = y3z2^3
+    // fp2_mul(&S4, &S4, &S1);          // S4 = Y3Z2^3
+    fp2_mul_batched(ts4, ts4, ts1);     // [t4, T4, s4, S4] = [t4, T4, s4, S4] * [t1, T1, s1, S1]
+
+
+    //fp2_mul(&t0, &t0, &t1);          // t0 = (z1z2)^2
+    //fp2_mul(&T0, &T0, &T1);          // T0 = (Z1Z2)^2
+    //fp2_mul(&s0, &s0, &s1);          // s0 = (z3z2)^2
+    //fp2_mul(&S0, &S0, &S1);          // S0 = (Z3Z2)^2
+    fp2_mul_batched(ts0, ts0, ts1);    // [t0, T0, s0, S0] = [t0, T0, s0, S0] * [t1, T1, s1, S1]
+    //fp2_mul(&t6, &t4, &t5);          // t6 = (z1z_2)^3y1y2
+    //fp2_mul(&T6, &T4, &T5);          // T6 = (Z1Z_2)^3Y1Y2
+    //fp2_mul(&s6, &s4, &s5);          // s6 = (z3z_4)^3y3y4
+    //fp2_mul(&S6, &S4, &S5);          // S6 = (Z3Z_4)^3Y3Y4
+    fp2_mul_batched(az, ts4, ts5);     // [t6, T6, s6, S6] = [t4, T4, s4, S4] * [t5, T5, s5, S5]
+
+    // fp2_sqr(&t4, &t4);               // t4 = y1^2z2^6
+    // fp2_sqr(&T4, &T4);               // T4 = Y1^2Z2^6
+    // fp2_sqr(&s4, &s4);               // s4 = y3^2z2^6
+    // fp2_sqr(&S4, &S4);               // S4 = Y3^2z2^6
+    fp2_sqr_batched(ts4, ts4);          //[t4, t4, s4, S4] 
+
+    // fp2_sqr(&t5, &t5);               // t5 = z1^6y2^2
+    // fp2_sqr(&T5, &T5);               // T5 = Z1^6Y2^2
+    // fp2_sqr(&s5, &s5);               // s5 = z3^6y2^2
+    // fp2_sqr(&S5, &S5);               // S5 = Z3^6Y2^2
+    fp2_sqr_batched(ts5, ts5);          //[t5, T5, s5, S5]
+
+
+    // fp2_add(&t4, &t4, &t5);          // t4 = z1^6y2^2 + z2^6y1^2
+    // fp2_add(&T4, &T4, &T5);          // T4 = Z1^6Y2^2 + Z2^6Y1^2
+    // fp2_add(&s4, &s4, &s5);          // s4 = z3^6y2^2 + z2^6y3^2
+    // fp2_add(&S4, &S4, &S5);          // S4 = Z3^6Y2^2 + Z2^6Y3^2
+    fp2_add_batched(ts4, ts4, ts5);     //[t4, T4, s4, S4] = [t4, t4, s4, S4] + [t5, T5, s5, S5]
+    // fp2_add(&t5, &t2, &t3);          // t5 = x1z2^2 + x2z1^2
+    // fp2_add(&T5, &T2, &T3);          // T5 = X1Z2^2 + X2Z1^2
+    // fp2_add(&s5, &s2, &s3);          // s5 = x3z2^2 + x2z3^2
+    // fp2_add(&S5, &S2, &S3);          // S5 = X3Z2^2 + X2Z3^2
+    fp2_add_batched(ts5, ts2, ts3);     //[t5, T5, s5, S5] = [t2, T2, s2, S2] + [t3, T3, s3, S3]
+
+
+    // fp2_add(&add_comp1->v, &t6, &t6); // v  = 2(z1z2)^3y1y2
+    // fp2_add(&add_comp2->v, &T6, &T6); // v  = 2(Z1Z2)^3Y1Y2
+    // fp2_add(&add_comp3->v, &s6, &s6); // v  = 2(z3z2)^3y2y3
+    // fp2_add(&add_comp4->v, &S6, &S6); // v  = 2(Z3Z2)^3Y2Y3
+    fp2_add_batched(vcomp, az, az);      //[vcomp1, vcomp2, vcomp3, vcomp4] = [t6, T6, s6, S6] + [t6, T6, s6, S6]
+    fp2_bactched_reduction(vcomp);
+
+    // fp2_add(&t6, &t3, &t3);          // t6 = 2x2z1^2
+    // fp2_add(&T6, &T3, &T3);          // T6 = 2X2Z1^2
+    // fp2_add(&s6, &s3, &s3);          // s6 = 2x2z3^2
+    // fp2_add(&S6, &S3, &S3);          // S6 = 2X2Z3^2
+    fp2_add_batched(ts3, ts3, ts3);     //[t3, T3, s3, S3] = [t3, T3, s3, S3] + [t3, T3, s3, S3]
+
+    // fp2_mul(&t1, &AC1->A, &t0);       // t1 = A1*(z1z2)^2
+    // fp2_mul(&T1, &AC2->A, &T0);       // t1 = A2*(Z1Z2)^2
+    // fp2_mul(&s1, &AC1->A, &s0);       // s1 = A1*(z3z2)^2
+    // fp2_mul(&S1, &AC2->A, &S0);       // S1 = A2*(Z3z2)^2
+    for (int i=0; i<FP2_LIMBS; i++){ tr2[i][2] = tr2[i][0]; tr2[i][3] = tr2[i][1]; }//[AC1A, AC2A, AC1A, AC2A]
+    fp2_mul_batched(ts1, tr2, ts0);      // [t1, T1, s1, S1] = [AC1A*t0, AC2A*T0, AC1A*s0, AC2A*S0]
+
+
+    //fp2_add(&t1, &t5, &t1);          // t1 = gamma =A*(z1z2)^2 + x1z2^2 + x2z1^2
+    //fp2_add(&T1, &T5, &T1);          // T1 = Gamma =A*(Z1Z2)^2 + X1Z2^2 + X2Z1^2
+    //fp2_add(&s1, &s5, &s1);          // s1 = gamma =A*(z3z2)^2 + x3z2^2 + x2z3^2
+    //fp2_add(&S1, &S5, &S1);          // S1 = Gamma =A*(Z3Z2)^2 + X3Z2^2 + X2Z3^2
+    fp2_add_batched(ts1, ts5, ts1);    // [t1, T1, s1, S1] = [t5, T5, s5, S5] + [t1, T1, s1, S1] 
+
+
+
+    // fp2_sub(&t6, &t5, &t6);          // t6 = lambda = x1z2^2 - x2z1^2
+    // fp2_sub(&T6, &T5, &T6);          // t6 = Lambda = X1Z2^2 - X2Z1^2
+    // fp2_sub(&s6, &s5, &s6);          // s6 = lambda = x3z2^2 - x2z3^2
+    // fp2_sub(&S6, &S5, &S6);          // S6 = Lambda = X3Z2^2 - X2Z3^2
+    fp2_sub_batched(ts3, ts5, ts3); //[t3, T3, s3, S3] = [t5, T5, s5, S5] + [t3, T3, s3, S3]
+    fp2_bactched_reduction(ts3);
+
+    // fp2_sqr(&t6, &t6);               // t6 = lambda^2 = (x1z2^2 - x2z1^2)^2
+    // fp2_sqr(&T6, &T6);               // T6 = Lambda^2 = (X1Z2^2 - X2Z1^2)^2
+    // fp2_sqr(&s6, &s6);               // s6 = lambda^2 = (x3z2^2 - x2z3^2)^2
+    // fp2_sqr(&S6, &S6);               // S6 = Lambda^2 = (X3Z2^2 - X2Z3^2)^2
+    fp2_sqr_batched(ts3, ts3);   //[t3, T3, s3, S3] = [t3, T3, s3, S3] * [t3, T3, s3, S3]
+
+
+    // fp2_mul(&add_comp1->w, &t6, &t0); // w  = (z1z2)^2(lambda)^2
+    // fp2_mul(&add_comp2->w, &T6, &T0); // w  = (Z1Z2)^2(Lambda)^2
+    // fp2_mul(&add_comp3->w, &s6, &s0); // w  = (z3z2)^2(lambda)^2
+    // fp2_mul(&add_comp4->w, &S6, &S0); // w  = (Z3Z2)^2(Lambda)^2
+    fp2_mul_batched(wcomp, ts3, ts0); //[wcomp1, wcomp2, wcomp3, wcomp4] = [t3*t0, T3*T0, s3*s0, S3*S0]
+
+
+    // fp2_mul(&t1, &t1, &t6);          // t1 = gamma*lambda^2
+    // fp2_mul(&T1, &T1, &T6);          // T1 = Gamma*Lambda^2
+    // fp2_mul(&s1, &s1, &s6);          // s1 = gamma*lambda^2
+    // fp2_mul(&S1, &S1, &S6);          // S1 = Gamma*Lambda^2
+    fp2_mul_batched(ts1, ts1, ts3);     // [t1, T1, s1, S1] = [t1, T1, s1, S1] * [t3, T3, s3, S3]
+
+
+    // fp2_sub(&add_comp1->u, &t4, &t1); // u1  = z1^6y2^2 + z2^6y1^2 - gamma*lambda^2
+    // fp2_sub(&add_comp2->u, &T4, &T1); // u2  = Z1^6Y2^2 + Z2^6Y1^2 - Gamma*Lambda^2
+    // fp2_sub(&add_comp3->u, &s4, &s1); // u3  = z3^6y2^2 + z2^6y3^2 - gamma*lambda^2
+    // fp2_sub(&add_comp4->u, &S4, &S1); // u4  = Z3^6Y2^2 + Z2^6Y3^2 - Gamma*Lambda^2
+    fp2_sub_batched(ucomp, ts4, ts1);  //[ucomp1, ucomp2, ucomp3, ucomp4] = [t4, T4, s4, S4] * [t1, T1, s1, S1] 
+    fp2_bactched_reduction(ucomp);
+}
+
+
+// Same as gluing_eval_point but in the very special case where we already know that the point will
+// have a zero coordinate at the place where the zero coordinate of the dual_theta_nullpoint would
+// have made the computation difficult
+static int
+gluing_eval_point_special_case(theta_point_t *image, const theta_couple_point_t *P, const theta_gluing_t *phi)
+{
+    theta_point_t T;
+
+    // Apply the basis change
+    base_change(&T, phi, P);
+
+    // Apply the to_squared_theta transform
+    to_squared_theta(&T, &T);
+
+    // This coordinate should always be 0 in a gluing because D=0.
+    // If this is not the case, something went very wrong, so reject
+    if (!fp2_is_zero(&T.t))
+        return 0;
+
+    // Compute (x, y, z, t)
+    fp2_mul(&image->x, &T.x, &phi->precomputation.x);
+    fp2_mul(&image->y, &T.y, &phi->precomputation.y);
+    fp2_mul(&image->z, &T.z, &phi->precomputation.z);
+    fp2_set_zero(&image->t);
+
+    hadamard(image, image);
+    return 1;
+}
+
+static inline int 
+gluing_eval_point_special_case_vec(uint32x4_t *out, const theta_couple_point_t *P, const uint32x4_t (*mm)[FP2_LIMBS], const uint32x4_t *precompute)
+{
+    uint32x4_t ax[FP2_LIMBS], az[FP2_LIMBS];
+    uint32x4_t M[4][FP2_LIMBS];
+
+    //memcpy
+    for (int i=0; i<FP2_LIMBS; i++){
+        az[i] = precompute[i];
+        M[0][i] = mm[0][i];
+        M[1][i] = mm[1][i];
+        M[2][i] = mm[2][i];
+        M[3][i] = mm[3][i];
+    }
+
+    // Apply the basis change
+    base_change_vec(ax, P, M);
+
+    // Apply the to_squared_theta transform
+    to_squared_theta_batched(ax, ax);
+
+    // This coordinate should always be 0 in a gluing because D=0.
+    // If this is not the case, something went very wrong, so reject
+    if (!fp2_is_zero_32(ax, 3)) return 0;
+
+    // Compute (x, y, z, t)
+    fp2_mul_batched(ax, ax, az);
+    
+    hadamard_vec(out, ax);
+    return 1;
+}
+
+/**
+ * @brief Evaluate a gluing isogeny from an elliptic product on a basis
+ *
+ * @param image1 Output: the theta_point of the image of the first couple of points
+ * @param image2 Output : the theta point of the image of the second couple of points
+ * @param xyT1: A pair of points (X : Y : Z) on E1E2 to glue using phi
+ * @param xyT2: A pair of points (X : Y : Z) on E1E2 to glue using phi
+ * @param phi : a gluing isogeny E1 x E2 -> A
+ *
+ **/
+static void
+gluing_eval_basis(theta_point_t *image1,
+                  theta_point_t *image2,
+                  const theta_couple_jac_point_t *xyT1,
+                  const theta_couple_jac_point_t *xyT2,
+                  const theta_gluing_t *phi)
+{
+    gluing_eval_point(image1, xyT1, phi);
+    gluing_eval_point(image2, xyT2, phi);
+}
+
+static inline void 
+gluing_eval_basis_vec(uint32x4_t *iA32, uint32x4_t *iB32, 
+                  const uint32x4_t *xyT1, const uint32x4_t *xyT2,
+                  const uint32x4_t *Phidomain,  const uint32x4_t *PhixyK1_8, const uint32x4_t *PhiimgK1_8,
+                  const uint32x4_t (*Phim)[FP2_LIMBS])
+{
+    //gluing_eval_point(image1, xyT1, phi);
+    //gluing_eval_point(image2, xyT2, phi);
+    //Doing two set gluing evaluation with the same phi
+    
+    //u: v:7r w:
+    uint32x4_t ucomp[FP2_LIMBS], vcomp[FP2_LIMBS], wcomp[FP2_LIMBS];
+
+    // Compute the cross addition components of P1+Q1 and P2+Q2
+    //jac_to_xz_add_components(&add_comp1, &P->P1, &phi->xyK1_8.P1, &phi->domain.E1);
+    //jac_to_xz_add_components(&add_comp2, &P->P2, &phi->xyK1_8.P2, &phi->domain.E2);
+    jac_to_xz_add_components_vec(ucomp, vcomp, wcomp, xyT1, xyT2, Phidomain, PhixyK1_8);
+    //ucomp = [add_comp1.u, add_comp2.u, add_comp3.u, add_comp4.u]
+    //vcomp = [add_comp1.v, add_comp2.v, add_comp3.v, add_comp4.v]
+    //wcomp = [add_comp1.w, add_comp2.w, add_comp3.w, add_comp4.w]
+
+    // Compute T1 and T2 derived from the cross addition components.
+    uint32x4_t a32[FP2_LIMBS], b32[FP2_LIMBS], c32[FP2_LIMBS];
+    uint32x4_t r1[FP2_LIMBS], r2[FP2_LIMBS], r3[FP2_LIMBS], r4[FP2_LIMBS], mm[4][FP2_LIMBS], imgK1_8[FP2_LIMBS];
+    //memory copy
+    for (int i=0; i<4; i++){
+        for (int j=0; j<FP2_LIMBS; j++){
+            mm[i][j] = Phim[i][j];
+        }
+    }
+    for (int i=0; i<FP2_LIMBS; i++){
+        imgK1_8[i] = PhiimgK1_8[i];
+    }
+
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = ucomp[i][0];
+        a32[i][1] = ucomp[i][2];
+        a32[i][2] = ucomp[i][0];
+        a32[i][3] = wcomp[i][0];
+        b32[i][0] = ucomp[i][1];
+        b32[i][1] = ucomp[i][3];
+        b32[i][2] = wcomp[i][1];
+        b32[i][3] = ucomp[i][1];
+    }
+    fp2_mul_batched(r1, a32, b32);  //[T1x, T3x, T1y, T1z] = [u1u2, u3u4, u1w2, w1u2]
+
+    // Compute T1 and T2 derived from the cross addition components.
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = vcomp[i][0];
+        a32[i][1] = vcomp[i][2];
+        a32[i][2] = ucomp[i][2];
+        a32[i][3] = wcomp[i][2];
+        b32[i][0] = vcomp[i][1];
+        b32[i][1] = vcomp[i][3];
+        b32[i][2] = wcomp[i][3];
+        b32[i][3] = ucomp[i][3];
+    }
+    fp2_mul_batched(r2, a32, b32);  //[T2t, T4t, T3y, T3z] = [v1v2, v3v4, u3w4, w3u4]
+
+    fp2_add_batched(c32, r1, r2);  //[T1x = u1u2 + v1v2, T3x = u3u4 + v3v4, non-def, non-def]
+
+    fp2_add_batched(r3, ucomp, vcomp);  //[T2x = (u1+v1), T2y = (u2+v2), T4x = (u3+v3), T4y = (u4+v4)]
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = r3[i][0];
+        a32[i][1] = r3[i][2];
+        a32[i][2] = wcomp[i][0];
+        a32[i][3] = wcomp[i][2];
+        b32[i][0] = r3[i][1];
+        b32[i][1] = r3[i][3];
+        b32[i][2] = wcomp[i][1];
+        b32[i][3] = wcomp[i][3];
+    }
+    fp2_mul_batched(r4, a32, b32); //[T2x = (u1+v1)(u2+v2), T4x = (u3+v3)(u4+v4), T1t = w1w2, T3t = w3w4]
+
+    //premutation to the correct position
+    for (int i=0; i<FP2_LIMBS; i++){
+        //T1
+        r1[i][0] = c32[i][0];
+        r1[i][1] = r1[i][2];
+        r1[i][2] = r1[i][3];
+        r1[i][3] = r4[i][2];
+        //T3
+        r3[i][0] = c32[i][1];
+        r3[i][1] = r2[i][2];
+        r3[i][2] = r2[i][3];
+        r3[i][3] = r4[i][3];
+    }
+    //reduce
+    fp2_bactched_reduction(r1);
+    //reduce
+    fp2_bactched_reduction(r3);
+
+    // fp2_sub(&T2.x, &T2.x, &T1.x);               // T2x = v1u2 + u1v2
+    // fp2_sub(&T4.x, &T4.x, &T3.x);               // T4x = v3u4 + u3v4
+    fp2_sub_batched(r4, r4, c32);
+    fp2_bactched_reduction(r4);
+    
+    // fp2_mul(&T2.y, &add_comp1.v, &add_comp2.w); // T2y = v1w2
+    // fp2_mul(&T2.z, &add_comp1.w, &add_comp2.v); // T2z = w1v2
+    // fp2_mul(&T4.y, &add_comp3.v, &add_comp4.w); // T4y = v3w4
+    // fp2_mul(&T4.z, &add_comp3.w, &add_comp4.v); // T4z = w3v4
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = vcomp[i][0];
+        a32[i][1] = wcomp[i][0];
+        a32[i][2] = vcomp[i][2];
+        a32[i][3] = wcomp[i][2];
+        b32[i][0] = wcomp[i][1];
+        b32[i][1] = vcomp[i][1];
+        b32[i][2] = wcomp[i][3];
+        b32[i][3] = vcomp[i][3];
+    }
+    fp2_mul_batched(a32, a32, b32);
+    
+    // fp2_set_zero(&T4.t);                        // T2t = 0
+    // fp2_set_zero(&T2.t);                        // T2t = 0
+    for (int i=0; i<FP2_LIMBS; i++){
+        //T2
+        r2[i][0] = r4[i][0];
+        r2[i][1] = a32[i][0];
+        r2[i][2] = a32[i][1];
+        r2[i][3] = 0;
+        //T4
+        r4[i][0] = r4[i][1];
+        r4[i][1] = a32[i][2];
+        r4[i][2] = a32[i][3];
+        r4[i][3] = 0;
+    }
+    //reduce
+    fp2_bactched_reduction(r2);
+    //reduce
+    fp2_bactched_reduction(r4);
+
+    // Apply the basis change and compute their respective square
+    // theta(P+Q) = M.T1 - M.T2 and theta(P-Q) = M.T1 + M.T2
+    // apply_isomorphism_general(&T1, &phi->M, &T1, true);
+    // apply_isomorphism_general(&T2, &phi->M, &T2, false);
+    // pointwise_square(&T1, &T1);
+    // pointwise_square(&T2, &T2);
+    apply_isomorphism_vec_1(ucomp, mm, r1);
+    apply_isomorphism_vec_2(vcomp, mm, r2);
+    fp2_sqr_batched(r1, ucomp);
+    fp2_sqr_batched(r2, vcomp);
+    // apply_isomorphism_general(&T3, &phi->M, &T3, true);
+    // apply_isomorphism_general(&T4, &phi->M, &T4, false);
+    // pointwise_square(&T3, &T3);
+    // pointwise_square(&T4, &T4);
+    apply_isomorphism_vec_1(ucomp, mm, r3);
+    apply_isomorphism_vec_2(vcomp, mm, r4);
+    fp2_sqr_batched(r3, ucomp);
+    fp2_sqr_batched(r4, vcomp);
+
+    // the difference between the two is therefore theta(P+Q)theta(P-Q)
+    // whose hadamard transform is then the product of the dual
+    // theta_points of phi(P) and phi(Q).
+    // fp2_sub(&T1.x, &T1.x, &T2.x);
+    // fp2_sub(&T1.y, &T1.y, &T2.y);
+    // fp2_sub(&T1.z, &T1.z, &T2.z);
+    // fp2_sub(&T1.t, &T1.t, &T2.t);
+    // hadamard(&T1, &T1);
+    fp2_sub_batched(r1, r1, r2);
+    //reduce
+    fp2_bactched_reduction(r1);
+    hadamard_vec(r1, r1);
+    // fp2_sub(&T3.x, &T3.x, &T4.x);
+    // fp2_sub(&T3.y, &T3.y, &T4.y);
+    // fp2_sub(&T3.z, &T3.z, &T4.z);
+    // fp2_sub(&T3.t, &T3.t, &T4.t);
+    // hadamard(&T3, &T3);
+    fp2_sub_batched(r3, r3, r4);
+    //reduce
+    fp2_bactched_reduction(r3);
+    hadamard_vec(r3, r3);
+
+
+    // Compute (x, y, z, t)
+    // As imageK1_8 = (x:x:y:y), its inverse is (y:y:x:x).
+    // fp2_mul(&imageA->x, &T1.x, &phi->imageK1_8.y);
+    // fp2_mul(&imageA->y, &T1.y, &phi->imageK1_8.y);
+    // fp2_mul(&imageA->z, &T1.z, &phi->imageK1_8.x);
+    // fp2_mul(&imageA->t, &T1.t, &phi->imageK1_8.x);
+    // hadamard(imageA, imageA);
+    fp2_mul_batched(iA32, r1, imgK1_8);
+    hadamard_vec(iA32, iA32);
+
+    // fp2_mul(&imageB->x, &T3.x, &phi->imageK1_8.y);
+    // fp2_mul(&imageB->y, &T3.y, &phi->imageK1_8.y);
+    // fp2_mul(&imageB->z, &T3.z, &phi->imageK1_8.x);
+    // fp2_mul(&imageB->t, &T3.t, &phi->imageK1_8.x);
+    // hadamard(imageB, imageB);
+    fp2_mul_batched(iB32, r3, imgK1_8);
+    hadamard_vec(iB32, iB32);
+}
+
+
+/**
+ * @brief Compute a (2,2) isogeny in dimension 2 in the theta_model
+ *
+ * @param out Output: the theta_isogeny
+ * @param A a theta null point for the domain
+ * @param T1_8 a point in A[8]
+ * @param T2_8 a point in A[8]
+ * @param hadamard_bool_1 a boolean used for the last two steps of the chain
+ * @param hadamard_bool_2 a boolean used for the last two steps of the chain
+ *
+ * out : A -> B of kernel [4](T1_8,T2_8)
+ * hadamard_bool_1 controls if the domain is in standard or dual coordinates
+ * hadamard_bool_2 controls if the codomain is in standard or dual coordinates
+ * verify: add extra sanity check to ensure our 8-torsion points are coherent with the isogeny
+ *
+ */
+static int
+theta_isogeny_compute(theta_isogeny_t *out,
+                      const theta_structure_t *A,
+                      const theta_point_t *T1_8,
+                      const theta_point_t *T2_8,
+                      bool hadamard_bool_1,
+                      bool hadamard_bool_2,
+                      bool verify)
+{
+    out->hadamard_bool_1 = hadamard_bool_1;
+    out->hadamard_bool_2 = hadamard_bool_2;
+    out->domain = *A;
+    out->T1_8 = *T1_8;
+    out->T2_8 = *T2_8;
+    out->codomain.precomputation = false;
+
+    theta_point_t TT1, TT2;
+
+    if (hadamard_bool_1) {
+        hadamard(&TT1, T1_8);
+        to_squared_theta(&TT1, &TT1);
+        hadamard(&TT2, T2_8);
+        to_squared_theta(&TT2, &TT2);
+    } else {
+        to_squared_theta(&TT1, T1_8);
+        to_squared_theta(&TT2, T2_8);
+    }
+
+    fp2_t t1, t2;
+
+    // Test that our projective factor ABCDxzw is non zero, where
+    // TT1=(Ax, Bx, Cy, Dy), TT2=(Az, Bw, Cz, Dw)
+    // But ABCDxzw=0 can only happen if we had an unexpected splitting in
+    // the isogeny chain.
+    // In either case reject
+    // (this is not strictly necessary, we could just return (0:0:0:0))
+    if (fp2_is_zero(&TT2.x) | fp2_is_zero(&TT2.y) | fp2_is_zero(&TT2.z) | fp2_is_zero(&TT2.t) | fp2_is_zero(&TT1.x) |
+        fp2_is_zero(&TT1.y))
+        return 0;
+
+    fp2_mul(&t1, &TT1.x, &TT2.y);
+    fp2_mul(&t2, &TT1.y, &TT2.x);
+    fp2_mul(&out->codomain.null_point.x, &TT2.x, &t1);
+    fp2_mul(&out->codomain.null_point.y, &TT2.y, &t2);
+    fp2_mul(&out->codomain.null_point.z, &TT2.z, &t1);
+    fp2_mul(&out->codomain.null_point.t, &TT2.t, &t2);
+    fp2_t t3;
+    fp2_mul(&t3, &TT2.z, &TT2.t);
+    fp2_mul(&out->precomputation.x, &t3, &TT1.y);
+    fp2_mul(&out->precomputation.y, &t3, &TT1.x);
+    fp2_copy(&out->precomputation.z, &out->codomain.null_point.t);
+    fp2_copy(&out->precomputation.t, &out->codomain.null_point.z);
+
+    // If T1_8 and T2_8 are our 8-torsion points, this ensures that the
+    // 4-torsion points 2T1_8 and 2T2_8 are isotropic.
+    if (verify) {
+        fp2_mul(&t1, &TT1.x, &out->precomputation.x);
+        fp2_mul(&t2, &TT1.y, &out->precomputation.y);
+        if (!fp2_is_equal(&t1, &t2))
+            return 0;
+        fp2_mul(&t1, &TT1.z, &out->precomputation.z);
+        fp2_mul(&t2, &TT1.t, &out->precomputation.t);
+        if (!fp2_is_equal(&t1, &t2))
+            return 0;
+        fp2_mul(&t1, &TT2.x, &out->precomputation.x);
+        fp2_mul(&t2, &TT2.z, &out->precomputation.z);
+        if (!fp2_is_equal(&t1, &t2))
+            return 0;
+        fp2_mul(&t1, &TT2.y, &out->precomputation.y);
+        fp2_mul(&t2, &TT2.t, &out->precomputation.t);
+        if (!fp2_is_equal(&t1, &t2))
+            return 0;
+    }
+
+    if (hadamard_bool_2) {
+        hadamard(&out->codomain.null_point, &out->codomain.null_point);
+    }
+    return 1;
+}
+
+/**
+ * @brief Compute a (2,2) isogeny when only the 4 torsion above the kernel is known and not the 8
+ * torsion
+ *
+ * @param out Output: the theta_isogeny
+ * @param A a theta null point for the domain
+ * @param T1_4 a point in A[4]
+ * @param T2_4 a point in A[4]
+ * @param hadamard_bool_1 a boolean
+ * @param hadamard_bool_2 a boolean
+ *
+ * out : A -> B of kernel [2](T1_4,T2_4)
+ * hadamard_bool_1 controls if the domain is in standard or dual coordinates
+ * hadamard_bool_2 controls if the codomain is in standard or dual coordinates
+ *
+ */
+static void
+theta_isogeny_compute_4(theta_isogeny_t *out,
+                        const theta_structure_t *A,
+                        const theta_point_t *T1_4,
+                        const theta_point_t *T2_4,
+                        bool hadamard_bool_1,
+                        bool hadamard_bool_2)
+{
+    out->hadamard_bool_1 = hadamard_bool_1;
+    out->hadamard_bool_2 = hadamard_bool_2;
+    out->domain = *A;
+    out->T1_8 = *T1_4;
+    out->T2_8 = *T2_4;
+    out->codomain.precomputation = false;
+
+    theta_point_t TT1, TT2;
+    // we will compute:
+    // TT1 = (xAB, _ , xCD, _)
+    // TT2 = (AA,BB,CC,DD)
+
+    // fp2_t xA_inv,zA_inv,tB_inv;
+
+    if (hadamard_bool_1) {
+        hadamard(&TT1, T1_4);
+        to_squared_theta(&TT1, &TT1);
+
+        hadamard(&TT2, &A->null_point);
+        to_squared_theta(&TT2, &TT2);
+    } else {
+        to_squared_theta(&TT1, T1_4);
+        to_squared_theta(&TT2, &A->null_point);
+    }
+
+    fp2_t sqaabb, sqaacc;
+    fp2_mul(&sqaabb, &TT2.x, &TT2.y);
+    fp2_mul(&sqaacc, &TT2.x, &TT2.z);
+    // No need to check the square roots, only used for signing.
+    // sqaabb = sqrt(AA*BB)
+    fp2_sqrt(&sqaabb);
+    // sqaacc = sqrt(AA*CC)
+    fp2_sqrt(&sqaacc);
+
+    // we compute out->codomain.null_point = (xAB * sqaacc * AA, xAB *sqaabb *sqaacc, xCD*sqaabb *
+    // AA) out->precomputation = (xAB * BB * CC *DD , sqaabb * CC * DD * xAB , sqaacc * BB* DD * xAB
+    // , xCD * sqaabb *sqaacc * BB)
+
+    fp2_mul(&out->codomain.null_point.y, &sqaabb, &sqaacc);
+    fp2_mul(&out->precomputation.t, &out->codomain.null_point.y, &TT1.z);
+    fp2_mul(&out->codomain.null_point.y, &out->codomain.null_point.y,
+            &TT1.x); // done for out->codomain.null_point.y
+
+    fp2_mul(&out->codomain.null_point.t, &TT1.z, &sqaabb);
+    fp2_mul(&out->codomain.null_point.t, &out->codomain.null_point.t,
+            &TT2.x); // done for out->codomain.null_point.t
+
+    fp2_mul(&out->codomain.null_point.x, &TT1.x, &TT2.x);
+    fp2_mul(&out->codomain.null_point.z, &out->codomain.null_point.x,
+            &TT2.z); // done for out->codomain.null_point.z
+    fp2_mul(&out->codomain.null_point.x, &out->codomain.null_point.x,
+            &sqaacc); // done for out->codomain.null_point.x
+
+    fp2_mul(&out->precomputation.x, &TT1.x, &TT2.t);
+    fp2_mul(&out->precomputation.z, &out->precomputation.x, &TT2.y);
+    fp2_mul(&out->precomputation.x, &out->precomputation.x, &TT2.z);
+    fp2_mul(&out->precomputation.y, &out->precomputation.x, &sqaabb); // done for out->precomputation.y
+    fp2_mul(&out->precomputation.x, &out->precomputation.x, &TT2.y);  // done for out->precomputation.x
+    fp2_mul(&out->precomputation.z, &out->precomputation.z, &sqaacc); // done for out->precomputation.z
+    fp2_mul(&out->precomputation.t, &out->precomputation.t, &TT2.y);  // done for out->precomputation.t
+
+    if (hadamard_bool_2) {
+        hadamard(&out->codomain.null_point, &out->codomain.null_point);
+    }
+}
+
+/**
+ * @brief Compute a (2,2) isogeny when only the kernel is known and not the 8 or 4 torsion above
+ *
+ * @param out Output: the theta_isogeny
+ * @param A a theta null point for the domain
+ * @param T1_2 a point in A[2]
+ * @param T2_2 a point in A[2]
+ * @param hadamard_bool_1 a boolean
+ * @param boo2 a boolean
+ *
+ * out : A -> B of kernel (T1_2,T2_2)
+ * hadamard_bool_1 controls if the domain is in standard or dual coordinates
+ * hadamard_bool_2 controls if the codomain is in standard or dual coordinates
+ *
+ */
+static void
+theta_isogeny_compute_2(theta_isogeny_t *out,
+                        const theta_structure_t *A,
+                        const theta_point_t *T1_2,
+                        const theta_point_t *T2_2,
+                        bool hadamard_bool_1,
+                        bool hadamard_bool_2)
+{
+    out->hadamard_bool_1 = hadamard_bool_1;
+    out->hadamard_bool_2 = hadamard_bool_2;
+    out->domain = *A;
+    out->T1_8 = *T1_2;
+    out->T2_8 = *T2_2;
+    out->codomain.precomputation = false;
+
+    theta_point_t TT2;
+    // we will compute:
+    // TT2 = (AA,BB,CC,DD)
+
+    if (hadamard_bool_1) {
+        hadamard(&TT2, &A->null_point);
+        to_squared_theta(&TT2, &TT2);
+    } else {
+        to_squared_theta(&TT2, &A->null_point);
+    }
+
+    // we compute out->codomain.null_point = (AA,sqaabb, sqaacc, sqaadd)
+    // out->precomputation = (  BB * CC *DD , sqaabb * CC * DD , sqaacc * BB* DD , sqaadd * BB * CC)
+    fp2_copy(&out->codomain.null_point.x, &TT2.x);
+    fp2_mul(&out->codomain.null_point.y, &TT2.x, &TT2.y);
+    fp2_mul(&out->codomain.null_point.z, &TT2.x, &TT2.z);
+    fp2_mul(&out->codomain.null_point.t, &TT2.x, &TT2.t);
+    // No need to check the square roots, only used for signing.
+    fp2_sqrt(&out->codomain.null_point.y);
+    fp2_sqrt(&out->codomain.null_point.z);
+    fp2_sqrt(&out->codomain.null_point.t);
+
+    fp2_mul(&out->precomputation.x, &TT2.z, &TT2.t);
+    fp2_mul(&out->precomputation.y,
+            &out->precomputation.x,
+            &out->codomain.null_point.y);                            // done for out->precomputation.y
+    fp2_mul(&out->precomputation.x, &out->precomputation.x, &TT2.y); // done for out->precomputation.x
+    fp2_mul(&out->precomputation.z, &TT2.t, &out->codomain.null_point.z);
+    fp2_mul(&out->precomputation.z, &out->precomputation.z, &TT2.y); // done for out->precomputation.z
+    fp2_mul(&out->precomputation.t, &TT2.z, &out->codomain.null_point.t);
+    fp2_mul(&out->precomputation.t, &out->precomputation.t, &TT2.y); // done for out->precomputation.t
+
+    if (hadamard_bool_2) {
+        hadamard(&out->codomain.null_point, &out->codomain.null_point);
+    }
+}
+
+
+static void 
+theta_isogeny_eval(theta_point_t *out, const theta_isogeny_t *phi, const theta_point_t *P)
+{
+    if (phi->hadamard_bool_1) {
+        hadamard(out, P);
+        to_squared_theta(out, out);
+    } else {
+        to_squared_theta(out, P);
+    }
+    fp2_mul(&out->x, &out->x, &phi->precomputation.x);
+    fp2_mul(&out->y, &out->y, &phi->precomputation.y);
+    fp2_mul(&out->z, &out->z, &phi->precomputation.z);
+    fp2_mul(&out->t, &out->t, &phi->precomputation.t);
+
+    if (phi->hadamard_bool_2) {
+        hadamard(out, out);
+    }
+}
+
+#if defined(ENABLE_SIGN)
+// Sample a random secret index in [0, 5] to select one of the 6 normalisation
+// matrices for the normalisation of the output of the (2,2)-chain during
+// splitting
+static unsigned char
+sample_random_index(void)
+{
+    // To avoid bias in reduction we should only consider integers smaller
+    // than 2^32 which are a multiple of 6, so we only reduce bytes with a
+    // value in [0, 4294967292-1].
+    // We have 4294967292/2^32 = ~99.9999999% chance that the first try is "good".
+    unsigned char seed_arr[4];
+    uint32_t seed;
+
+    do {
+        randombytes(seed_arr, 4);
+        seed = (seed_arr[0] | (seed_arr[1] << 8) | (seed_arr[2] << 16) | (seed_arr[3] << 24));
+    } while (seed >= 4294967292U);
+
+    uint32_t secret_index = seed - (((uint64_t)seed * 2863311531U) >> 34) * 6;
+    assert(secret_index == seed % 6); // ensure the constant time trick above works
+    return (unsigned char)secret_index;
+}
+#endif
+
+/* new version */
+static inline void 
+theta_isogeny_eval_vec(uint32x4_t *pt, uint32x4_t *phit, const bool hadamard_bool_1, const bool hadamard_bool_2)
+{
+    // 0-8 real, 9-17 imagination
+    if (hadamard_bool_1) hadamard_vec(pt, pt);
+ 
+    // P^2 * phi
+    to_squared_theta_batched(pt, pt);
+    fp2_mul_batched(pt, pt, phit);
+
+    if (hadamard_bool_2) hadamard_vec(pt, pt);
+}
+
+static inline int 
+theta_isogeny_compute_vec(uint32x4_t *out_T1_8, uint32x4_t *out_T2_8, 
+    bool *out_hadamard_bool_1, bool *out_hadamard_bool_2, 
+    uint32x4_t *domain_np,
+    bool *domain_flag,
+    uint32x4_t *domain_capital,
+    uint32x4_t *domain_lowercase,
+    uint32x4_t *precompute,
+    uint32x4_t *codomain_np,
+    bool *codomain_flag,
+    uint32x4_t *codomain_capital,
+    uint32x4_t *codomain_lowercase,
+    const uint32x4_t *A_np,
+    const bool *A_flag,
+    const uint32x4_t *A_capital,
+    const uint32x4_t *A_lowercase,
+    const uint32x4_t *T1_8,
+    const uint32x4_t *T2_8,
+    bool hadamard_bool_1,
+    bool hadamard_bool_2,
+    bool verify)
+{
+    out_hadamard_bool_1[0] = hadamard_bool_1;
+    out_hadamard_bool_2[0] = hadamard_bool_2;
+    domain_flag[0] = A_flag[0];
+    codomain_flag[0] = false;
+    for (int i=0; i<FP2_LIMBS; i++){
+        domain_np[i] = A_np[i];
+        domain_capital[i] = A_capital[i];
+        domain_lowercase[i] = A_lowercase[i];
+        out_T1_8[i] = T1_8[i];
+        out_T2_8[i] = T2_8[i];
+    }
+
+    uint32x4_t TT1[FP2_LIMBS], TT2[FP2_LIMBS];
+    for (int i=0; i<FP2_LIMBS; i++){
+        TT1[i] = T1_8[i];
+        TT2[i] = T2_8[i];
+    }
+
+    if (hadamard_bool_1) {
+        hadamard_vec(TT1, TT1);
+        hadamard_vec(TT2, TT2);
+    }
+    to_squared_theta_batched(TT1, TT1);
+    to_squared_theta_batched(TT2, TT2);
+    fp2_bactched_reduction(TT1);
+    fp2_bactched_reduction(TT2);
+
+    uint32x4_t riTT1[FP_LIMBS], mask, mask2;
+    for(int i = 0;i<FP_LIMBS;i++){
+        riTT1[i] = (uint32x4_t)vzip1q_u64((uint64x2_t)(TT1[i]), (uint64x2_t)(TT1[i+FP_LIMBS]));
+    }
+    mask = vandq_u32(theta_point_is_zero(TT2), theta_point_is_zero(TT2+FP_LIMBS));
+    mask2 = theta_point_is_zero(riTT1);
+    if( (mask2[0]&mask2[2]) || (mask2[1]&mask2[3]) || vaddvq_u32(mask)){
+        return 0;
+    }
+
+    // new TT1 = T1.y T1.x T2.t T2.z
+    //      x    T2.x T2.y T2.z T2.t
+    //      =    t2.  t1.  t3.  t3.
+    // reindex   t1.  t2.  t1.  t2.
+    //      x    T2.x T2.y T2.z T2.t
+    //      =    codomain
+    //           t3   t3.  
+    //      x    T1.y T1.x
+    //      =    precomputation
+    // new TT1
+    uint32x4_t t1[FP2_LIMBS], t2[FP2_LIMBS], t3[FP2_LIMBS];
+    uint32x4_t codomain[FP2_LIMBS] = {0}, precomputation[FP2_LIMBS] = {0}; 
+    for(int i = 0;i<FP2_LIMBS;i++){
+        t1[i][0] = TT1[i][1];
+        t1[i][1] = TT1[i][0];
+        t1[i][2] = TT2[i][3];
+        t1[i][3] = TT2[i][2];
+    }
+    fp2_mul_batched(t2, t1, TT2);
+    // reindex
+    for(int i = 0;i<FP2_LIMBS;i++){
+        t3[i][0] = t2[i][2];
+        t3[i][1] = t2[i][3];
+        t2[i][2] = t2[i][1];
+        t2[i][3] = t2[i][0];
+        t2[i][0] = t2[i][2];
+        t2[i][1] = t2[i][3];
+    }
+    fp2_mul_batched(codomain, t2, TT2);
+    fp2_mul_batched(precomputation, t3, t1);
+
+    // copy
+    for(int i = 0;i<FP2_LIMBS;i++){
+        precomputation[i][2] = codomain[i][3];
+        precomputation[i][3] = codomain[i][2];
+    }
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        codomain_np[i] = codomain[i];
+        precompute[i] = precomputation[i];
+    }
+
+    if (verify) {
+        fp2_mul_batched(t1, TT1, precomputation);
+        for(int i = 0;i<FP2_LIMBS;i++){
+            if(t1[i][0] != t1[i][1]){
+                return 0;
+            }
+            if(t1[i][2] != t1[i][3]){
+                return 0;
+            }
+        }
+        fp2_mul_batched(t1, TT2, precomputation);
+        for(int i = 0;i<FP2_LIMBS;i++){
+            if(t1[i][0] != t1[i][2]){
+                return 0;
+            }
+            if(t1[i][1] != t1[i][3]){
+                return 0;
+            }
+        }
+    }
+
+    if (hadamard_bool_2) {
+        hadamard_vec(codomain_np, codomain_np); 
+    }
+
+    return 1;
+}
+
+static inline void 
+theta_isogeny_compute_4_vec(uint32x4_t *out_T1_8, uint32x4_t *out_T2_8, 
+    bool *out_hadamard_bool_1, bool *out_hadamard_bool_2, 
+    uint32x4_t *domain_np,
+    bool *domain_flag,
+    uint32x4_t *domain_capital,
+    uint32x4_t *domain_lowercase,
+    uint32x4_t *precompute,
+    uint32x4_t *codomain_np,
+    bool *codomain_flag,
+    uint32x4_t *codomain_capital,
+    uint32x4_t *codomain_lowercase,
+    const uint32x4_t *A_np,
+    const bool *A_flag,
+    const uint32x4_t *A_capital,
+    const uint32x4_t *A_lowercase,
+    const uint32x4_t *T1_4,
+    const uint32x4_t *T2_4,
+    bool hadamard_bool_1,
+    bool hadamard_bool_2)
+{
+    out_hadamard_bool_1[0] = hadamard_bool_1;
+    out_hadamard_bool_2[0] = hadamard_bool_2;
+    memcpy(domain_np, A_np, sizeof(uint32x4_t)*FP2_LIMBS);
+    domain_flag[0] = A_flag[0];
+    memcpy(domain_capital, A_capital, sizeof(uint32x4_t)*FP2_LIMBS);
+    memcpy(domain_lowercase, A_lowercase, sizeof(uint32x4_t)*FP2_LIMBS);
+    memcpy(out_T1_8, T1_4, sizeof(uint32x4_t)*FP2_LIMBS);
+    memcpy(out_T2_8, T2_4, sizeof(uint32x4_t)*FP2_LIMBS);
+    codomain_flag[0] = false;
+
+    uint32x4_t TT1[FP2_LIMBS], TT2[FP2_LIMBS];
+    // we will compute:
+    // TT1 = (xAB, _ , xCD, _)
+    // TT2 = (AA,BB,CC,DD)
+
+    // if (hadamard_bool_1) {
+    //     hadamard(&TT1, T1_4);
+    //     to_squared_theta(&TT1, &TT1);
+
+    //     hadamard(&TT2, &A->null_point);
+    //     to_squared_theta(&TT2, &TT2);
+    // } else {
+    //     to_squared_theta(&TT1, T1_4);
+    //     to_squared_theta(&TT2, &A->null_point);
+    // }
+    memcpy(TT1, T1_4, sizeof(uint32x4_t)*FP2_LIMBS);
+    memcpy(TT2, A_np, sizeof(uint32x4_t)*FP2_LIMBS);
+    if (hadamard_bool_1) {
+        hadamard_vec(TT1, TT1);
+        hadamard_vec(TT2, TT2);
+    }
+    to_squared_theta_batched(TT1, TT1);
+    to_squared_theta_batched(TT2, TT2);
+    fp2_bactched_reduction(TT1);
+    fp2_bactched_reduction(TT2);
+
+    //TT1 = [x, y, z, t] = [xAA, xBB, xCC, xDD]
+    //TT2 = [x, y, z, t] = [AA, BB, CC, DD]
+    //aabb = AA * BB
+    //aacc = (AA * CC)
+    //codomain.null_point.x = (xAA * sqaacc) * AA
+    //codomain.null_point.y = (xAA * sqaacc) * sqaabb
+    //codomain.null_point.z = xAA * (AA * CC) 
+    //codomain.null_point.t = AA * (xCC * sqaabb)8
+
+    //precomputation.x = (xAA * DD) * (CC * BB)
+    //precomputation.y = (xAA * DD) * (CC * sqaabb)
+    //precomputation.z = (xAA * DD) * (BB * sqaacc)
+    //precomputation.t = (BB * sqaacc) * (xCC * sqaabb)
+    //m1 = (xAA * sqaacc)
+    //m2 = (xCC * sqaabb)
+    //m3 = (xAA * DD)
+    //m4 = (BB * sqaacc)
+    // fp2_t sqaabb, sqaacc, aabb, aacc;
+    // fp2_t m1, m2, m3, m4;
+    // fp2_mul(&aabb, &TT2.x, &TT2.y);
+    // fp2_mul(&aacc, &TT2.x, &TT2.z);
+    // fp2_mul(&m3, &TT1.x, &TT2.t);
+    // fp2_mul(&out->precomputation.x, &TT2.y, &TT2.z);
+    uint32x4_t a32[FP2_LIMBS], b32[FP2_LIMBS], c32[FP2_LIMBS], x32[FP2_LIMBS];
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = TT2[i][0];
+        a32[i][1] = TT2[i][0];
+        a32[i][2] = TT1[i][0];
+        a32[i][3] = TT2[i][1];
+
+        b32[i][0] = TT2[i][1];
+        b32[i][1] = TT2[i][2];
+        b32[i][2] = TT2[i][3];
+        b32[i][3] = TT2[i][2];
+    }
+    fp2_mul_batched(c32, a32, b32);
+
+    // No need to check the square roots, only used for signing.
+    // sqaabb = sqrt(AA*BB)
+    // sqaacc = sqrt(AA*CC)
+    // sqaabb = aabb;
+    // sqaacc = aacc;
+    // fp2_sqrt(&sqaabb);
+    // fp2_sqrt(&sqaacc);
+    fp2_sqrt_vec_batched_2(x32, c32);
+
+    // fp2_mul(&m1, &TT1.x, &sqaacc);
+    // fp2_mul(&m4, &TT2.y, &sqaacc);
+    // fp2_mul(&m2, &TT1.z, &sqaabb);
+    // fp2_mul(&out->precomputation.y, &TT2.z, &sqaabb);
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = TT1[i][0];
+        a32[i][1] = TT2[i][1];
+        a32[i][2] = TT1[i][2];
+        a32[i][3] = TT2[i][2];
+
+        b32[i][0] = x32[i][1];
+        b32[i][1] = x32[i][1];
+        b32[i][2] = x32[i][0];
+        b32[i][3] = x32[i][0];
+    }
+    fp2_mul_batched(a32, a32, b32);
+
+
+    // fp2_mul(&out->codomain.null_point.x, &m1, &TT2.x);
+    // fp2_mul(&out->codomain.null_point.y, &m1, &sqaabb);
+    // fp2_mul(&out->codomain.null_point.z, &TT1.x, &aacc);
+    // fp2_mul(&out->codomain.null_point.t, &TT2.x, &m2);
+    for (int i=0; i<FP2_LIMBS; i++){
+        b32[i][0] = a32[i][0];
+        b32[i][1] = a32[i][0];
+        b32[i][2] = TT1[i][0];
+        b32[i][3] = TT2[i][0];
+
+        x32[i][1] = x32[i][0];
+        x32[i][0] = TT2[i][0];
+        x32[i][2] = c32[i][1];
+        x32[i][3] = a32[i][2];
+    }
+    fp2_mul_batched(codomain_np, b32, x32);
+
+    // fp2_mul(&out->precomputation.x, &m3, &out->precomputation.x);
+    // fp2_mul(&out->precomputation.y, &m3, &out->precomputation.y);
+    // fp2_mul(&out->precomputation.z, &m3, &m4);
+    // fp2_mul(&out->precomputation.t, &m4, &m2);
+    for (int i=0; i<FP2_LIMBS; i++){
+        b32[i][0] = c32[i][3];
+        b32[i][1] = a32[i][3];
+        b32[i][2] = a32[i][1];
+        b32[i][3] = a32[i][2];
+
+        a32[i][3] = a32[i][1];
+        a32[i][0] = c32[i][2];
+        a32[i][1] = c32[i][2];
+        a32[i][2] = c32[i][2];
+    }
+    fp2_mul_batched(precompute, a32, b32);
+
+    // if (hadamard_bool_2) hadamard(&out->codomain.null_point, &out->codomain.null_point);
+    if (hadamard_bool_2) {
+        hadamard_vec(codomain_np, codomain_np); 
+    }
+}
+
+
+static inline void 
+theta_isogeny_compute_2_vec(uint32x4_t *out_T1_8, uint32x4_t *out_T2_8, 
+    bool *out_hadamard_bool_1, bool *out_hadamard_bool_2, 
+    uint32x4_t *domain_np,
+    bool *domain_flag,
+    uint32x4_t *domain_capital,
+    uint32x4_t *domain_lowercase,
+    uint32x4_t *precompute,
+    uint32x4_t *codomain_np,
+    bool *codomain_flag,
+    uint32x4_t *codomain_capital,
+    uint32x4_t *codomain_lowercase,
+    const uint32x4_t *A_np,
+    const bool *A_flag,
+    const uint32x4_t *A_capital,
+    const uint32x4_t *A_lowercase,
+    const uint32x4_t *T1_2,
+    const uint32x4_t *T2_2,
+    bool hadamard_bool_1,
+    bool hadamard_bool_2)
+{
+    out_hadamard_bool_1[0] = hadamard_bool_1;
+    out_hadamard_bool_2[0] = hadamard_bool_2;
+    memcpy(domain_np, A_np, sizeof(uint32x4_t)*FP2_LIMBS);
+    domain_flag[0] = A_flag[0];
+    memcpy(domain_capital, A_capital, sizeof(uint32x4_t)*FP2_LIMBS);
+    memcpy(domain_lowercase, A_lowercase, sizeof(uint32x4_t)*FP2_LIMBS);
+    memcpy(out_T1_8, T1_2, sizeof(uint32x4_t)*FP2_LIMBS);
+    memcpy(out_T2_8, T2_2, sizeof(uint32x4_t)*FP2_LIMBS);
+    codomain_flag[0] = false;
+
+    uint32x4_t TT2[FP2_LIMBS];
+    // we will compute: TT2 = (AA,BB,CC,DD)
+    memcpy(TT2, A_np, sizeof(uint32x4_t)*FP2_LIMBS);
+    if (hadamard_bool_1) {
+        hadamard_vec(TT2, TT2);
+    }
+    to_squared_theta_batched(TT2, TT2);
+    fp2_bactched_reduction(TT2);
+
+    //TT2 = [x, y, z, t] = [AA, BB, CC, DD]
+    //aabb = (AA * BB), aacc = (AA * CC), aadd = (AA * DD)
+    // out->codomain.null_point = (AA, sqaabb, sqaacc, sqaadd)
+    // out->precomputation = (  BB * CC *DD , sqaabb * CC * DD , sqaacc * BB* DD , sqaadd * BB * CC)
+
+    // fp2_copy(&out->codomain.null_point.x, &TT2.x);
+    // fp2_mul(&out->precomputation.x, &TT2.z, &TT2.t);
+    // fp2_mul(&out->codomain.null_point.y, &TT2.x, &TT2.y);
+    // fp2_mul(&out->codomain.null_point.z, &TT2.x, &TT2.z);
+    // fp2_mul(&out->codomain.null_point.t, &TT2.x, &TT2.t);
+    uint32x4_t a32[FP2_LIMBS], b32[FP2_LIMBS];
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = TT2[i][2];
+        a32[i][1] = TT2[i][0];
+        a32[i][2] = TT2[i][0];
+        a32[i][3] = TT2[i][0];
+
+        b32[i][0] = TT2[i][3];
+        b32[i][1] = TT2[i][1];
+        b32[i][2] = TT2[i][2];
+        b32[i][3] = TT2[i][3];
+    }
+    fp2_mul_batched(precompute, a32, b32);
+
+    // No need to check the square roots, only used for signing.
+    // fp2_sqrt(&out->codomain.null_point.y);
+    // fp2_sqrt(&out->codomain.null_point.z);
+    // fp2_sqrt(&out->codomain.null_point.t);
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = precompute[i][1];
+        a32[i][1] = precompute[i][2];
+        b32[i][0] = precompute[i][3];
+    }
+    fp2_sqrt_vec_batched_2(codomain_np, a32);
+    fp2_sqrt_vec_batched_2(b32, b32);
+
+
+    // fp2_mul(&out->precomputation.y, &out->precomputation.x, &out->codomain.null_point.y); // done for out->precomputation.y
+    // fp2_mul(&out->precomputation.x, &out->precomputation.x, &TT2.y); // done for out->precomputation.x
+    // fp2_mul(&out->precomputation.z, &TT2.t, &out->codomain.null_point.z);
+    // fp2_mul(&out->precomputation.t, &TT2.z, &out->codomain.null_point.t);
+    for (int i=0; i<FP2_LIMBS; i++){
+        codomain_np[i][3] = b32[i][0];
+        codomain_np[i][2] = codomain_np[i][1];
+        codomain_np[i][1] = codomain_np[i][0];
+        codomain_np[i][0] = TT2[i][0];
+        
+
+        a32[i][0] = precompute[i][0];
+        a32[i][1] = precompute[i][0];
+        a32[i][2] = TT2[i][3];
+        a32[i][3] = TT2[i][2];
+
+        b32[i][0] = TT2[i][1];
+        b32[i][1] = codomain_np[i][1];
+        b32[i][2] = codomain_np[i][2];
+        b32[i][3] = codomain_np[i][3];
+    }
+    fp2_mul_batched(precompute, a32, b32);
+
+    //fp2_mul(&out->precomputation.z, &out->precomputation.z, &TT2.y); // done for out->precomputation.z
+    //fp2_mul(&out->precomputation.t, &out->precomputation.t, &TT2.y); // done for out->precomputation.t
+    for (int i=0; i<FP2_LIMBS; i++){
+        b32[i][2] = TT2[i][1];
+        b32[i][3] = TT2[i][1];
+    }
+    fp2_mul_batched(a32, precompute, b32);
+    for (int i=0; i<FP2_LIMBS; i++){
+        precompute[i][2] = a32[i][2];
+        precompute[i][3] = a32[i][3];
+    }
+
+
+    // if (hadamard_bool_2) {
+    //     hadamard(&out->codomain.null_point, &out->codomain.null_point);
+    // }
+    if (hadamard_bool_2) {
+        hadamard_vec(codomain_np, codomain_np); 
+    }
+}
+
+static bool
+splitting_compute_vec(uint32x4_t (*mmatrix)[FP2_LIMBS], uint32x4_t* np, const uint32x4_t* A_np, const theta_structure_t *A, int zero_index, bool randomize)
+
+{
+    // init
+    uint32_t ctl;
+    uint32_t count = 0;
+    fp2_t U_cst, t1, t2;
+    theta_splitting_t out;
+
+    memset(&out.M, 0, sizeof(basis_change_matrix_t));
+
+    // enumerate through all indices
+    for (int i = 0; i < 10; i++) {
+        fp2_set_zero(&U_cst);
+        for (int t = 0; t < 4; t++) {
+            // Iterate through the null point
+            choose_index_theta_point(&t2, t, &A->null_point);
+            choose_index_theta_point(&t1, t ^ EVEN_INDEX[i][1], &A->null_point);
+
+            // Compute t1 * t2
+            fp2_mul(&t1, &t1, &t2);
+            // If CHI_EVAL(i,t) is +1 we want ctl to be 0 and
+            // If CHI_EVAL(i,t) is -1 we want ctl to be 0xFF..FF
+            ctl = (uint32_t)(CHI_EVAL[EVEN_INDEX[i][0]][t] >> 1);
+            assert(ctl == 0 || ctl == 0xffffffff);
+
+            fp2_neg(&t2, &t1);
+            fp2_select(&t1, &t1, &t2, ctl);
+
+            // Then we compute U_cst ± (t1 * t2)
+            fp2_add(&U_cst, &U_cst, &t1);
+        }
+
+        // If U_cst is 0 then update the splitting matrix
+        ctl = fp2_is_zero(&U_cst);
+        count -= ctl;
+        select_base_change_matrix(&out.M, &out.M, &SPLITTING_TRANSFORMS[i], ctl);
+        if (zero_index != -1 && i == zero_index &&
+            !ctl) { // extra checks if we know exactly where the 0 index should be
+            return 0;
+        }
+    }
+
+#if defined(ENABLE_SIGN)
+    // Pick a random normalization matrix
+    if (randomize) {
+        unsigned char secret_index = sample_random_index();
+        basis_change_matrix_t Mrandom;
+
+        set_base_change_matrix_from_precomp(&Mrandom, &NORMALIZATION_TRANSFORMS[0]);
+
+        // Use a constant time selection to pick the index we want
+        for (unsigned char i = 1; i < 6; i++) {
+            // When i == secret_index, mask == 0 and 0xFF..FF otherwise
+            int32_t mask = i - secret_index;
+            mask = (mask | -mask) >> 31;
+            select_base_change_matrix(&Mrandom, &Mrandom, &NORMALIZATION_TRANSFORMS[i], ~mask);
+        }
+        base_change_matrix_multiplication(&out.M, &Mrandom, &out.M);
+    }
+#else
+    assert(!randomize);
+#endif
+
+    // apply the isomorphism to ensure the null point is compatible with splitting
+    //apply_isomorphism(&out->B.null_point, &out->M, &A->null_point);
+    uint32x4_t tmp[FP2_LIMBS];
+    transpose_matrix_with_R2(mmatrix, out.M);
+    memmove(tmp, A_np, sizeof(uint32x4_t)*FP2_LIMBS);
+    apply_isomorphism_vec_1(np, mmatrix, tmp);
+
+    // splitting was successful only if exactly one zero was identified
+    return count == 1;
+}
+
+int theta_point_to_montgomery_point_vec(uint32x4_t *out, const uint32x4_t *P, const uint32x4_t *A_np)
+{
+    uint32x4_t tmp[FP2_LIMBS], a32[FP2_LIMBS];
+    if (!is_product_theta_point_vec(P)) return 0;
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        tmp[i][0] = P[i][0];
+        tmp[i][1] = P[i][1];
+        tmp[i][2] = P[i][0];
+        tmp[i][3] = P[i][2];
+    }
+    // x1 = &P->x;
+    // z1 = &P->y;
+    // if (fp2_is_zero(x1) & fp2_is_zero(z1)) {
+    //     x1 = &P->z;
+    //     z1 = &P->t;
+    // }
+    // x2 = &P->x;
+    // z2 = &P->z;
+    // if (fp2_is_zero(x2) & fp2_is_zero(z2)) {
+    //     x2 = &P->y;
+    //     z2 = &P->t;
+    // }
+    uint32x4_t flag = vandq_u32(theta_point_is_zero(tmp), theta_point_is_zero(tmp+FP_LIMBS));
+    if (flag[0] & flag[1]){
+        for (int i=0; i<FP2_LIMBS; i++){
+            tmp[i][0] = P[i][2];
+            tmp[i][1] = P[i][3];
+        }
+    }
+    if (flag[2] & flag[3]){
+        for (int i=0; i<FP2_LIMBS; i++){
+            tmp[i][2] = P[i][1];
+            tmp[i][3] = P[i][3];
+        }
+    }
+
+    //if (fp2_is_zero(x1) & fp2_is_zero(z1)) return 0; // at this point P=(0:0:0:0) so is invalid
+    flag = vandq_u32(theta_point_is_zero(tmp), theta_point_is_zero(tmp+FP_LIMBS));
+    if (flag[0] & flag[1]) return 0;
+
+    
+    // P2.X = A.null_point.y * P.x + A.null_point.x * P.y
+    // P2.Z = - A.null_point.y * P.x + A.null_point.x * P.y
+    // P1.X = A.null_point.z * P.x + A.null_point.x * P.z
+    // P1.Z = -A.null_point.z * P.x + A.null_point.x * P.z
+    // fp2_mul(&P12->P2.x, &A->null_point.y, x1);
+    // fp2_mul(&temp2    , &A->null_point.x, z1);
+    // fp2_mul(&P12->P1.x, &A->null_point.z, x2);
+    // fp2_mul(&temp1    , &A->null_point.x, z2);
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][0] = A_np[i][1];
+        a32[i][1] = A_np[i][0];
+        a32[i][2] = A_np[i][2];
+        a32[i][3] = A_np[i][0];
+    }
+    fp2_mul_batched(tmp, tmp, a32);
+    
+
+    // fp2_sub(&P12->P2.z, &temp2          , &P12->P2.x);
+    // fp2_sub(&P12->P1.z, &temp1          , &P12->P1.x);
+    for (int i=0; i<FP2_LIMBS; i++){
+        a32[i][1] = tmp[i][0];
+        a32[i][3] = tmp[i][2];
+    }
+    fp2_sub_batched(out, tmp, a32);
+    fp2_bactched_reduction(out);
+
+
+    // fp2_add(&P12->P2.x, &P12->P2.x,       &temp2);
+    // fp2_add(&P12->P1.x, &P12->P1.x      , &temp1);
+    fp2_add_batched(a32, tmp, a32);
+    fp2_bactched_reduction(a32);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        out[i][0] = a32[i][3];
+        tmp[i][0] = out[i][1]; 
+        out[i][1] = out[i][3];
+        out[i][2] = a32[i][1];
+        out[i][3] = tmp[i][0];
+    }
+    
+    return 1;
+}
+
+/* end of new batched funcs */
+
+
+static bool
+splitting_compute(theta_splitting_t *out, const theta_structure_t *A, int zero_index, bool randomize)
+
+{
+    // init
+    uint32_t ctl;
+    uint32_t count = 0;
+    fp2_t U_cst, t1, t2;
+
+    memset(&out->M, 0, sizeof(basis_change_matrix_t));
+
+    // enumerate through all indices
+    for (int i = 0; i < 10; i++) {
+        fp2_set_zero(&U_cst);
+        for (int t = 0; t < 4; t++) {
+            // Iterate through the null point
+            choose_index_theta_point(&t2, t, &A->null_point);
+            choose_index_theta_point(&t1, t ^ EVEN_INDEX[i][1], &A->null_point);
+
+            // Compute t1 * t2
+            fp2_mul(&t1, &t1, &t2);
+            // If CHI_EVAL(i,t) is +1 we want ctl to be 0 and
+            // If CHI_EVAL(i,t) is -1 we want ctl to be 0xFF..FF
+            ctl = (uint32_t)(CHI_EVAL[EVEN_INDEX[i][0]][t] >> 1);
+            assert(ctl == 0 || ctl == 0xffffffff);
+
+            fp2_neg(&t2, &t1);
+            fp2_select(&t1, &t1, &t2, ctl);
+
+            // Then we compute U_cst ± (t1 * t2)
+            fp2_add(&U_cst, &U_cst, &t1);
+        }
+
+        // If U_cst is 0 then update the splitting matrix
+        ctl = fp2_is_zero(&U_cst);
+        count -= ctl;
+        select_base_change_matrix(&out->M, &out->M, &SPLITTING_TRANSFORMS[i], ctl);
+        if (zero_index != -1 && i == zero_index &&
+            !ctl) { // extra checks if we know exactly where the 0 index should be
+            return 0;
+        }
+    }
+
+#if defined(ENABLE_SIGN)
+    // Pick a random normalization matrix
+    if (randomize) {
+        unsigned char secret_index = sample_random_index();
+        basis_change_matrix_t Mrandom;
+
+        set_base_change_matrix_from_precomp(&Mrandom, &NORMALIZATION_TRANSFORMS[0]);
+
+        // Use a constant time selection to pick the index we want
+        for (unsigned char i = 1; i < 6; i++) {
+            // When i == secret_index, mask == 0 and 0xFF..FF otherwise
+            int32_t mask = i - secret_index;
+            mask = (mask | -mask) >> 31;
+            select_base_change_matrix(&Mrandom, &Mrandom, &NORMALIZATION_TRANSFORMS[i], ~mask);
+        }
+        base_change_matrix_multiplication(&out->M, &Mrandom, &out->M);
+    }
+#else
+    assert(!randomize);
+#endif
+
+    // apply the isomorphism to ensure the null point is compatible with splitting
+    apply_isomorphism(&out->B.null_point, &out->M, &A->null_point);
+
+    // splitting was successful only if exactly one zero was identified
+    return count == 1;
+}
+
+static int
+theta_product_structure_to_elliptic_product(theta_couple_curve_t *E12, theta_structure_t *A)
+{
+    fp2_t xx, yy;
+
+    // This should be true from our computations in splitting_compute
+    // but still check this for sanity
+    if (!is_product_theta_point(&A->null_point))
+        return 0;
+
+    ec_curve_init(&(E12->E1));
+    ec_curve_init(&(E12->E2));
+
+    // A valid elliptic theta null point has no zero coordinate
+    if (fp2_is_zero(&A->null_point.x) | fp2_is_zero(&A->null_point.y) | fp2_is_zero(&A->null_point.z))
+        return 0;
+
+    // xx = x², yy = y²
+    fp2_sqr(&xx, &A->null_point.x);
+    fp2_sqr(&yy, &A->null_point.y);
+    // xx = x^4, yy = y^4
+    fp2_sqr(&xx, &xx);
+    fp2_sqr(&yy, &yy);
+
+    // A2 = -2(x^4+y^4)/(x^4-y^4)
+    fp2_add(&E12->E2.A, &xx, &yy);
+    fp2_sub(&E12->E2.C, &xx, &yy);
+    fp2_add(&E12->E2.A, &E12->E2.A, &E12->E2.A);
+    fp2_neg(&E12->E2.A, &E12->E2.A);
+
+    // same with x,z
+    fp2_sqr(&xx, &A->null_point.x);
+    fp2_sqr(&yy, &A->null_point.z);
+    fp2_sqr(&xx, &xx);
+    fp2_sqr(&yy, &yy);
+
+    // A1 = -2(x^4+z^4)/(x^4-z^4)
+    fp2_add(&E12->E1.A, &xx, &yy);
+    fp2_sub(&E12->E1.C, &xx, &yy);
+    fp2_add(&E12->E1.A, &E12->E1.A, &E12->E1.A);
+    fp2_neg(&E12->E1.A, &E12->E1.A);
+
+    if (fp2_is_zero(&E12->E1.C) | fp2_is_zero(&E12->E2.C))
+        return 0;
+
+    return 1;
+}
+
+static int
+theta_point_to_montgomery_point(theta_couple_point_t *P12, const theta_point_t *P, const theta_structure_t *A)
+{
+    fp2_t temp;
+    const fp2_t *x, *z;
+
+    if (!is_product_theta_point(P))
+        return 0;
+
+    x = &P->x;
+    z = &P->y;
+    if (fp2_is_zero(x) & fp2_is_zero(z)) {
+        x = &P->z;
+        z = &P->t;
+    }
+    if (fp2_is_zero(x) & fp2_is_zero(z)) {
+        return 0; // at this point P=(0:0:0:0) so is invalid
+    }
+    // P2.X = A.null_point.y * P.x + A.null_point.x * P.y
+    // P2.Z = - A.null_point.y * P.x + A.null_point.x * P.y
+    fp2_mul(&P12->P2.x, &A->null_point.y, x);
+    fp2_mul(&temp, &A->null_point.x, z);
+    fp2_sub(&P12->P2.z, &temp, &P12->P2.x);
+    fp2_add(&P12->P2.x, &P12->P2.x, &temp);
+
+    x = &P->x;
+    z = &P->z;
+    if (fp2_is_zero(x) & fp2_is_zero(z)) {
+        x = &P->y;
+        z = &P->t;
+    }
+    // P1.X = A.null_point.z * P.x + A.null_point.x * P.z
+    // P1.Z = -A.null_point.z * P.x + A.null_point.x * P.z
+    fp2_mul(&P12->P1.x, &A->null_point.z, x);
+    fp2_mul(&temp, &A->null_point.x, z);
+    fp2_sub(&P12->P1.z, &temp, &P12->P1.x);
+    fp2_add(&P12->P1.x, &P12->P1.x, &temp);
+    return 1;
+}
+
+
+static int
+_theta_chain_compute_impl_ref(unsigned n,
+                          theta_couple_curve_t *E12,
+                          const theta_kernel_couple_points_t *ker,
+                          bool extra_torsion,
+                          theta_couple_curve_t *E34,
+                          theta_couple_point_t *P12,
+                          size_t numP,
+                          bool verify,
+                          bool randomize)
+{
+    theta_structure_t theta;
+
+    // lift the basis
+    theta_couple_jac_point_t xyT1, xyT2;
+
+    ec_basis_t bas1 = { .P = ker->T1.P1, .Q = ker->T2.P1, .PmQ = ker->T1m2.P1 };
+    ec_basis_t bas2 = { .P = ker->T1.P2, .Q = ker->T2.P2, .PmQ = ker->T1m2.P2 };
+    if (!lift_basis(&xyT1.P1, &xyT2.P1, &bas1, &E12->E1)){
+        printf("error 1!\n");
+        return 0;
+    }
+    if (!lift_basis(&xyT1.P2, &xyT2.P2, &bas2, &E12->E2)){
+        printf("error 2!\n");
+        return 0;
+    }
+    const unsigned extra = HD_extra_torsion * extra_torsion;
+
+#ifndef NDEBUG
+    assert(extra == 0 || extra == 2); // only cases implemented
+    if (!test_point_order_twof(&bas2.P, &E12->E2, n + extra))
+        debug_print("bas2.P does not have correct order");
+
+    if (!test_jac_order_twof(&xyT2.P2, &E12->E2, n + extra))
+        debug_print("xyT2.P2 does not have correct order");
+#endif
+
+    theta_point_t pts[numP ? numP : 1];
+
+    int space = 1;
+    for (unsigned i = 1; i < n; i *= 2)
+        ++space;
+
+    uint16_t todo[space];
+    todo[0] = n - 2 + extra;
+
+    int current = 0;
+
+    // kernel points for the gluing isogeny
+    theta_couple_jac_point_t jacQ1[space], jacQ2[space];
+    jacQ1[0] = xyT1;
+    jacQ2[0] = xyT2;
+    while (todo[current] != 1) {
+        assert(todo[current] >= 2);
+        ++current;
+        assert(current < space);
+        // the gluing isogeny is quite a bit more expensive than the others,
+        // so we adjust the usual splitting rule here a little bit: towards
+        // the end of the doubling chain it will be cheaper to recompute the
+        // doublings after evaluation than to push the intermediate points.
+        const unsigned num_dbls = todo[current - 1] >= 16 ? todo[current - 1] / 2 : todo[current - 1] - 1;
+        assert(num_dbls && num_dbls < todo[current - 1]);
+        double_couple_jac_point_iter(&jacQ1[current], num_dbls, &jacQ1[current - 1], E12);
+        double_couple_jac_point_iter(&jacQ2[current], num_dbls, &jacQ2[current - 1], E12);
+        todo[current] = todo[current - 1] - num_dbls;
+    }
+
+    // kernel points for the remaining isogeny steps
+    theta_point_t thetaQ1[space], thetaQ2[space];
+
+
+    // the gluing step
+    theta_gluing_t first_step;
+    {
+        assert(todo[current] == 1);
+
+        // compute the gluing isogeny
+        if (!gluing_compute(&first_step, E12, &jacQ1[current], &jacQ2[current], verify)) return 0;
+
+        // evaluate
+        for (unsigned j = 0; j < numP; ++j) {
+            assert(ec_is_zero(&P12[j].P1) || ec_is_zero(&P12[j].P2));
+            if (!gluing_eval_point_special_case(&pts[j], &P12[j], &first_step)){
+                printf("%u\n", j);
+                return 0;
+            }
+        }
+
+        // push kernel points through gluing isogeny
+        for (int j = 0; j < current; ++j) {
+            gluing_eval_basis(&thetaQ1[j], &thetaQ2[j], &jacQ1[j], &jacQ2[j], &first_step);
+            --todo[j];
+        }
+
+        --current;
+    }
+
+    // set-up the theta_structure for the first codomain
+    theta.null_point = first_step.codomain;
+    theta.precomputation = 0;
+    theta_precomputation(&theta);
+
+    theta_isogeny_t step;
+
+    // and now we do the remaining steps
+    for (unsigned i = 1; current >= 0 && todo[current]; ++i) {
+        assert(current < space);
+        while (todo[current] != 1) {
+            assert(todo[current] >= 2);
+            ++current;
+            assert(current < space);
+            const unsigned num_dbls = todo[current - 1] / 2;
+            assert(num_dbls && num_dbls < todo[current - 1]);
+            double_iter(&thetaQ1[current], &theta, &thetaQ1[current - 1], num_dbls);
+            double_iter(&thetaQ2[current], &theta, &thetaQ2[current - 1], num_dbls);
+            todo[current] = todo[current - 1] - num_dbls;
+        }
+
+        // computing the next step
+        int ret;
+        if (i == n - 2) // penultimate step
+            ret = theta_isogeny_compute(&step, &theta, &thetaQ1[current], &thetaQ2[current], 0, 0, verify);
+        else if (i == n - 1) // ultimate step
+            ret = theta_isogeny_compute(&step, &theta, &thetaQ1[current], &thetaQ2[current], 1, 0, false);
+        else
+            ret = theta_isogeny_compute(&step, &theta, &thetaQ1[current], &thetaQ2[current], 0, 1, verify);
+        if (!ret)
+            return 0;
+
+        for (unsigned j = 0; j < numP; ++j)
+            theta_isogeny_eval(&pts[j], &step, &pts[j]);
+
+        // updating the codomain
+        theta = step.codomain;
+
+        // pushing the kernel
+        assert(todo[current] == 1);
+        for (int j = 0; j < current; ++j) {
+            theta_isogeny_eval(&thetaQ1[j], &step, &thetaQ1[j]);
+            theta_isogeny_eval(&thetaQ2[j], &step, &thetaQ2[j]);
+            assert(todo[j]);
+            --todo[j];
+        }
+
+        --current;
+    }
+
+    assert(current == -1);
+
+    if (!extra_torsion) {
+        if (n >= 3) {
+            // in the last step we've skipped pushing the kernel since current was == 0, let's do it now
+            theta_isogeny_eval(&thetaQ1[0], &step, &thetaQ1[0]);
+            theta_isogeny_eval(&thetaQ2[0], &step, &thetaQ2[0]);
+        }
+
+        // penultimate step
+        theta_isogeny_compute_4(&step, &theta, &thetaQ1[0], &thetaQ2[0], 0, 0);
+        for (unsigned j = 0; j < numP; ++j)
+            theta_isogeny_eval(&pts[j], &step, &pts[j]);
+        theta = step.codomain;
+        theta_isogeny_eval(&thetaQ1[0], &step, &thetaQ1[0]);
+        theta_isogeny_eval(&thetaQ2[0], &step, &thetaQ2[0]);
+
+        // ultimate step
+        theta_isogeny_compute_2(&step, &theta, &thetaQ1[0], &thetaQ2[0], 1, 0);
+        for (unsigned j = 0; j < numP; ++j)
+            theta_isogeny_eval(&pts[j], &step, &pts[j]);
+        theta = step.codomain;
+    }
+
+    // final splitting step
+    theta_splitting_t last_step;
+
+    bool is_split = splitting_compute(&last_step, &theta, extra_torsion ? 8 : -1, randomize);
+
+    if (!is_split) {
+        debug_print("kernel did not generate an isogeny between elliptic products");
+        return 0;
+    }
+
+    if (!theta_product_structure_to_elliptic_product(E34, &last_step.B))
+        return 0;
+
+    // evaluate
+    for (size_t j = 0; j < numP; ++j) {
+        apply_isomorphism(&pts[j], &last_step.M, &pts[j]);
+        if (!theta_point_to_montgomery_point(&P12[j], &pts[j], &last_step.B))
+            return 0;
+    }
+
+    return 1;
+}
+
+static int
+_theta_chain_compute_impl_randomized(unsigned n,
+                          theta_couple_curve_t *E12,
+                          const theta_kernel_couple_points_t *ker,
+                          bool extra_torsion,
+                          theta_couple_curve_t *E34,
+                          theta_couple_point_t *P12,
+                          size_t numP,
+                          bool verify,
+                          bool randomize)
+{
+    //uint64_t time;
+    theta_structure_t theta;
+
+    // lift the basis
+    //time = rdtsc();
+    theta_couple_jac_point_t xyT1, xyT2;
+
+    //There requires sqrt_vec and inv_vec and is only 0.1M so defering
+    ec_basis_t bas1 = { .P = ker->T1.P1, .Q = ker->T2.P1, .PmQ = ker->T1m2.P1 };
+    ec_basis_t bas2 = { .P = ker->T1.P2, .Q = ker->T2.P2, .PmQ = ker->T1m2.P2 };
+    if (!lift_basis(&xyT1.P1, &xyT2.P1, &bas1, &E12->E1)){
+        printf("error 1!\n");
+        return 0;
+    }
+    if (!lift_basis(&xyT1.P2, &xyT2.P2, &bas2, &E12->E2)){
+        printf("error 2!\n");
+        return 0;
+    }
+    //printf("lift_basis: %lu\n", rdtsc()-time);
+
+    const unsigned extra = HD_extra_torsion * extra_torsion;
+
+#ifndef NDEBUG
+    assert(extra == 0 || extra == 2); // only cases implemented
+    if (!test_point_order_twof(&bas2.P, &E12->E2, n + extra))
+        debug_print("bas2.P does not have correct order");
+
+    if (!test_jac_order_twof(&xyT2.P2, &E12->E2, n + extra))
+        debug_print("xyT2.P2 does not have correct order");
+#endif
+
+    //theta_point_t pts[numP ? numP : 1];
+    uint32x4_t vecPts[numP ? numP : 1][FP2_LIMBS];
+
+    int space = 1;
+    for (unsigned i = 1; i < n; i *= 2){
+        ++space;
+    }
+
+    uint16_t todo[space];
+    todo[0] = n - 2 + extra;
+
+    int current = 0;
+
+    // kernel points for the gluing isogeny
+    theta_couple_jac_point_t jacQ1[space], jacQ2[space];
+    jacQ1[0] = xyT1;
+    jacQ2[0] = xyT2;
+
+    //data transform
+    uint32x4_t E1[FP2_LIMBS], E2[FP2_LIMBS], jp1[FP2_LIMBS*2], jp2[FP2_LIMBS*2], out1[FP2_LIMBS*2], out2[FP2_LIMBS*2];
+    theta_point_t tp;
+    fp_t mb, imb;
+    initial_montback_array(&mb, &imb);
+    //EC
+    ec_curve_to_vec32(E1, E12->E1);    
+    ec_curve_to_vec32(E2, E12->E2); 
+    //jac point
+    jac_point_to_vec32(jp1, xyT1.P1);
+    jac_point_to_vec32(jp1+FP2_LIMBS, xyT1.P2);
+    jac_point_to_vec32(jp2, xyT2.P1);
+    jac_point_to_vec32(jp2+FP2_LIMBS, xyT2.P2);
+    // kernel points to vec
+    uint32x4_t jac_result[3*FP2_LIMBS*space];
+    for (int i=0; i<FP2_LIMBS; i++){
+        jac_result[i][0] = jp1[i][0];
+        jac_result[i][1] = jp1[i][1];
+        jac_result[i][2] = jp1[i][2]; 
+        jac_result[i][3]    = jp1[i+FP2_LIMBS][0];
+        jac_result[FP2_LIMBS+i][0] = jp1[i+FP2_LIMBS][1];
+        jac_result[FP2_LIMBS+i][1] = jp1[i+FP2_LIMBS][2];
+
+        jac_result[FP2_LIMBS+i][2] = jp2[i][0];
+        jac_result[FP2_LIMBS+i][3] = jp2[i][1];
+        jac_result[2*FP2_LIMBS+i][0] = jp2[i][2]; 
+        jac_result[2*FP2_LIMBS+i][1] = jp2[i+FP2_LIMBS][0];
+        jac_result[2*FP2_LIMBS+i][2] = jp2[i+FP2_LIMBS][1];
+        jac_result[2*FP2_LIMBS+i][3] = jp2[i+FP2_LIMBS][2];
+    }
+    
+    while (todo[current] != 1) {
+        assert(todo[current] >= 2);
+        ++current;
+        assert(current < space);
+        // the gluing isogeny is quite a bit more expensive than the others,
+        // so we adjust the usual splitting rule here a little bit: towards
+        // the end of the doubling chain it will be cheaper to recompute the
+        // doublings after evaluation than to push the intermediate points.
+        const unsigned num_dbls = todo[current - 1] >= 16 ? todo[current - 1] / 2 : todo[current - 1] - 1;
+        assert(num_dbls && num_dbls < todo[current - 1]);
+        // preserve output of jac points as [P.x, P.y, P.z, 0]
+        // however, keep two couple_jac_points with three vector registers.
+        // then update.
+        double_couple_jac_point_iter_vec(out1, out1+FP2_LIMBS, num_dbls, jp1, jp1+FP2_LIMBS, E1, E2);
+        double_couple_jac_point_iter_vec(out2, out2+FP2_LIMBS, num_dbls, jp2, jp2+FP2_LIMBS, E1, E2);
+        for (int i=0; i<FP2_LIMBS; i++){
+            jac_result[(3*FP2_LIMBS)*current+i][0] = out1[i][0];
+            jac_result[(3*FP2_LIMBS)*current+i][1] = out1[i][1];
+            jac_result[(3*FP2_LIMBS)*current+i][2] = out1[i][2]; 
+            jac_result[(3*FP2_LIMBS)*current+i][3]    = out1[i+FP2_LIMBS][0];
+            jac_result[(3*FP2_LIMBS)*current+FP2_LIMBS+i][0] = out1[i+FP2_LIMBS][1];
+            jac_result[(3*FP2_LIMBS)*current+FP2_LIMBS+i][1] = out1[i+FP2_LIMBS][2];
+
+            jac_result[(3*FP2_LIMBS)*current+FP2_LIMBS+i][2] = out2[i][0];
+            jac_result[(3*FP2_LIMBS)*current+FP2_LIMBS+i][3] = out2[i][1];
+            jac_result[(3*FP2_LIMBS)*current+(2*FP2_LIMBS)+i][0] = out2[i][2]; 
+            jac_result[(3*FP2_LIMBS)*current+(2*FP2_LIMBS)+i][1] = out2[i+FP2_LIMBS][0];
+            jac_result[(3*FP2_LIMBS)*current+(2*FP2_LIMBS)+i][2] = out2[i+FP2_LIMBS][1];
+            jac_result[(3*FP2_LIMBS)*current+(2*FP2_LIMBS)+i][3] = out2[i+FP2_LIMBS][2];
+        }
+        for (int i=0; i<(FP2_LIMBS*2); i++){
+            jp1[i] = out1[i];
+            jp2[i] = out2[i];
+        }
+        todo[current] = todo[current - 1] - num_dbls;
+    }
+    // only need "current" case for gluing compute
+    {
+        itranspose(&tp, out1);
+        theta_montback(&tp, &imb);
+        jacQ1[current].P1.x = tp.x;
+        jacQ1[current].P1.y = tp.y;
+        jacQ1[current].P1.z = tp.z;
+        itranspose(&tp, out1+FP2_LIMBS);
+        theta_montback(&tp, &imb);
+        jacQ1[current].P2.x = tp.x;
+        jacQ1[current].P2.y = tp.y;
+        jacQ1[current].P2.z = tp.z;
+        itranspose(&tp, out2);
+        theta_montback(&tp, &imb);
+        jacQ2[current].P1.x = tp.x;
+        jacQ2[current].P1.y = tp.y;
+        jacQ2[current].P1.z = tp.z;
+        itranspose(&tp, out2+FP2_LIMBS);
+        theta_montback(&tp, &imb);
+        jacQ2[current].P2.x = tp.x;
+        jacQ2[current].P2.y = tp.y;
+        jacQ2[current].P2.z = tp.z;
+    }
+
+    // kernel points for the remaining isogeny steps
+    //theta_point_t thetaQ1[space], thetaQ2[space];
+    uint32x4_t thetaQ1_R2[space][FP2_LIMBS*2], thetaQ2_R2[space][FP2_LIMBS*2];
+
+    // the gluing step = Phi
+    theta_gluing_t first_step;
+    uint32x4_t Phidomain[FP2_LIMBS*2], PhixyK1_8[FP2_LIMBS*2], PhiimgK1_8yx[FP2_LIMBS];
+    {
+        assert(todo[current] == 1);
+
+        // compute the gluing isogeny
+        if (!gluing_compute(&first_step, E12, &jacQ1[current], &jacQ2[current], verify)){
+            printf("error 3!\n");
+            return 0;
+        }
+        // evaluate
+        uint32x4_t mm[4][FP2_LIMBS], precompute[FP2_LIMBS];
+        transpose_matrix_with_R2(mm, first_step.M);
+        theta_point_to_vec32(precompute, first_step.precomputation);
+
+        for (unsigned j = 0; j < numP; ++j) {
+            assert(ec_is_zero(&P12[j].P1) || ec_is_zero(&P12[j].P2));
+            if (!gluing_eval_point_special_case_vec(vecPts[j], &P12[j], mm, precompute)){
+                printf("error 4 %u!\n", j);
+                return 0;
+            }
+        }
+
+        // push kernel points through gluing isogeny
+        uint32x4_t jacQ1_32[FP2_LIMBS*2], jacQ2_32[FP2_LIMBS*2];
+        //tranform to R2
+        {
+            //first_step.domain
+            tp.x = first_step.domain.E1.A;
+            tp.y = first_step.domain.E1.C;
+            tp.z = first_step.domain.E1.A24.x;
+            tp.t = first_step.domain.E1.A24.z;
+            theta_montback(&tp, &mb);
+            transpose(Phidomain, tp);
+            tp.x = first_step.domain.E2.A;
+            tp.y = first_step.domain.E2.C;
+            tp.z = first_step.domain.E2.A24.x;
+            tp.t = first_step.domain.E2.A24.z;
+            theta_montback(&tp, &mb);
+            transpose(Phidomain+FP2_LIMBS, tp);
+            //first_step.xyK1_8
+            tp.x = first_step.xyK1_8.P1.x;
+            tp.y = first_step.xyK1_8.P1.y;
+            tp.z = first_step.xyK1_8.P1.z;
+            theta_montback(&tp, &mb);
+            transpose(PhixyK1_8, tp);
+            tp.x = first_step.xyK1_8.P2.x;
+            tp.y = first_step.xyK1_8.P2.y;
+            tp.z = first_step.xyK1_8.P2.z;
+            theta_montback(&tp, &mb);
+            transpose(PhixyK1_8+FP2_LIMBS, tp);
+            //first_step.imageK1_8
+            tp.x = first_step.imageK1_8.y;
+            tp.y = first_step.imageK1_8.y;
+            tp.z = first_step.imageK1_8.x;
+            tp.t = first_step.imageK1_8.x;
+            theta_montback(&tp, &mb);
+            transpose(PhiimgK1_8yx, tp);
+        }
+        for (int j = 0; j < current; ++j) {
+            //couple jac point of PA
+            for (int z=0; z<FP2_LIMBS; z++){
+                //jacQ1
+                jacQ1_32[z][0] = jac_result[(FP2_LIMBS*3)*j+z][0];
+                jacQ1_32[z][1] = jac_result[(FP2_LIMBS*3)*j+z][1];
+                jacQ1_32[z][2] = jac_result[(FP2_LIMBS*3)*j+z][2];
+                jacQ1_32[z][3] = 0;
+                jacQ1_32[z+FP2_LIMBS][0] = jac_result[(FP2_LIMBS*3)*j+z][3];
+                jacQ1_32[z+FP2_LIMBS][1] = jac_result[(FP2_LIMBS*3)*j+FP2_LIMBS+z][0];
+                jacQ1_32[z+FP2_LIMBS][2] = jac_result[(FP2_LIMBS*3)*j+FP2_LIMBS+z][1];
+                jacQ1_32[z+FP2_LIMBS][3] = 0;
+                //jacQ2
+                jacQ2_32[z][0] = jac_result[(FP2_LIMBS*3)*j+FP2_LIMBS+z][2];
+                jacQ2_32[z][1] = jac_result[(FP2_LIMBS*3)*j+FP2_LIMBS+z][3];
+                jacQ2_32[z][2] = jac_result[(FP2_LIMBS*3)*j+(FP2_LIMBS*2)+z][0];
+                jacQ2_32[z][3] = 0;
+                jacQ2_32[z+FP2_LIMBS][0] = jac_result[(FP2_LIMBS*3)*j+(FP2_LIMBS*2)+z][1];
+                jacQ2_32[z+FP2_LIMBS][1] = jac_result[(FP2_LIMBS*3)*j+(FP2_LIMBS*2)+z][2];
+                jacQ2_32[z+FP2_LIMBS][2] = jac_result[(FP2_LIMBS*3)*j+(FP2_LIMBS*2)+z][3];
+                jacQ2_32[z+FP2_LIMBS][3] = 0;
+            }
+            // gluing_eval_basis(&thetaQ1[j], &thetaQ2[j], &jacQ1[j], &jacQ2[j], &first_step);
+            gluing_eval_basis_vec(thetaQ1_R2[j], thetaQ2_R2[j], jacQ1_32, jacQ2_32, Phidomain, PhixyK1_8, PhiimgK1_8yx, mm);
+            --todo[j];
+        }
+        --current;
+    }
+    //printf("gluing: %lu\n", rdtsc()-time);
+
+    
+
+    // set-up the theta_structure for the first codomain    
+    uint32x4_t theta_capital[FP2_LIMBS], theta_lowercase[FP2_LIMBS], theta_np[FP2_LIMBS]; 
+    bool theta_flag = 0;
+    theta_point_to_vec32(theta_np, first_step.codomain);
+    theta_precomputation_vec(theta_capital, theta_lowercase, theta_np, &theta_flag);    
+
+    //theta_isogeny_t step;
+    uint32x4_t step_T1_8[FP2_LIMBS], step_T2_8[FP2_LIMBS];
+    bool step_hadamard_bool_1, step_hadamard_bool_2, step_domain_precomputation, step_codomain_precomputation;
+    uint32x4_t step_domain_np[FP2_LIMBS], step_domain_capital[FP2_LIMBS], step_domain_lowercase[FP2_LIMBS];
+    uint32x4_t step_codomain_np[FP2_LIMBS] = {0}, step_codomain_capital[FP2_LIMBS] = {0}, step_codomain_lowercase[FP2_LIMBS] = {0}, step_precompute[FP2_LIMBS] = {0};
+    //and now we do the remaining steps
+    for (unsigned i = 1; current >= 0 && todo[current]; ++i) {
+        assert(current < space);
+        while (todo[current] != 1) {
+            assert(todo[current] >= 2);
+            ++current;
+            assert(current < space);
+            const unsigned num_dbls = todo[current - 1] / 2;
+            assert(num_dbls && num_dbls < todo[current - 1]);
+            // double_iter(&thetaQ1[current], &theta, &thetaQ1[current - 1], num_dbls);
+            // double_iter(&thetaQ2[current], &theta, &thetaQ2[current - 1], num_dbls);
+            double_iter_vec(thetaQ1_R2[current], theta_np, theta_capital, theta_lowercase, &theta_flag, thetaQ1_R2[current - 1], num_dbls);
+            double_iter_vec(thetaQ2_R2[current], theta_np, theta_capital, theta_lowercase, &theta_flag, thetaQ2_R2[current - 1], num_dbls);
+            todo[current] = todo[current - 1] - num_dbls;
+        }
+        
+        // computing the next step
+        int ret;
+        if (i == n - 2){
+            // penultimate step
+            //ret = theta_isogeny_compute(&step, &theta, &thetaQ1[current], &thetaQ2[current], 0, 0, verify);
+            ret = theta_isogeny_compute_vec(step_T1_8, step_T2_8, &step_hadamard_bool_1, &step_hadamard_bool_2,
+                step_domain_np, &step_domain_precomputation, step_domain_capital, step_domain_lowercase, step_precompute,
+                step_codomain_np, &step_codomain_precomputation, step_codomain_capital, step_codomain_lowercase,
+                theta_np, &theta_flag, theta_capital, theta_lowercase,
+                thetaQ1_R2[current], thetaQ2_R2[current], 0, 0, verify);
+        }else if (i == n - 1){ 
+            // ultimate step
+            //ret = theta_isogeny_compute(&step, &theta, &thetaQ1[current], &thetaQ2[current], 1, 0, false);
+            ret = theta_isogeny_compute_vec(step_T1_8, step_T2_8, &step_hadamard_bool_1, &step_hadamard_bool_2,
+                step_domain_np, &step_domain_precomputation, step_domain_capital, step_domain_lowercase, step_precompute,
+                step_codomain_np, &step_codomain_precomputation, step_codomain_capital, step_codomain_lowercase,
+                theta_np, &theta_flag, theta_capital, theta_lowercase,
+                thetaQ1_R2[current], thetaQ2_R2[current], 1, 0, false);
+        }else{
+            //ret = theta_isogeny_compute(&step, &theta, &thetaQ1[current], &thetaQ2[current], 0, 1, verify);
+            ret = theta_isogeny_compute_vec(step_T1_8, step_T2_8, &step_hadamard_bool_1, &step_hadamard_bool_2,
+                step_domain_np, &step_domain_precomputation, step_domain_capital, step_domain_lowercase, step_precompute,
+                step_codomain_np, &step_codomain_precomputation, step_codomain_capital, step_codomain_lowercase,
+                theta_np, &theta_flag, theta_capital, theta_lowercase,
+                thetaQ1_R2[current], thetaQ2_R2[current], 0, 1, verify);
+        }
+        
+        if (!ret){
+            printf("error 5!\n");
+            return 0;
+        }
+
+        for (unsigned j = 0; j < numP; ++j){
+            //theta_isogeny_eval(&pts[j], &step, &pts[j]);
+            theta_isogeny_eval_vec(vecPts[j], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+        }
+
+        // updating the codomain
+        //theta = step.codomain;
+        theta_flag = step_codomain_precomputation;
+        for (int j=0; j<FP2_LIMBS; j++){
+            theta_np[j] = step_codomain_np[j];
+        }
+
+        // pushing the kernel
+        assert(todo[current] == 1);
+        for (int j = 0; j < current; ++j) {
+            //theta_isogeny_eval(&thetaQ1[j], &step, &thetaQ1[j]);
+            //theta_isogeny_eval(&thetaQ2[j], &step, &thetaQ2[j]);
+            theta_isogeny_eval_vec(thetaQ1_R2[j], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+            theta_isogeny_eval_vec(thetaQ2_R2[j], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+            assert(todo[j]);
+            --todo[j];
+        }
+        --current;
+    }
+      
+    assert(current == -1);
+    if (!extra_torsion) {
+        if (n >= 3) {
+            // in the last step we've skipped pushing the kernel since current was == 0, let's do it now
+            // theta_isogeny_eval(&thetaQ1[0], &step, &thetaQ1[0]);
+            // theta_isogeny_eval(&thetaQ2[0], &step, &thetaQ2[0]);
+            theta_isogeny_eval_vec(thetaQ1_R2[0], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+            theta_isogeny_eval_vec(thetaQ2_R2[0], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+        }
+
+        // penultimate step
+        // theta_isogeny_compute_4(&step, &theta, &thetaQ1[0], &thetaQ2[0], 0, 0);
+        theta_isogeny_compute_4_vec(step_T1_8, step_T2_8, 
+             &step_hadamard_bool_1, &step_hadamard_bool_2,
+             step_domain_np, &step_domain_precomputation, step_domain_capital, step_domain_lowercase,
+             step_precompute, 
+             step_codomain_np, &step_codomain_precomputation, step_codomain_capital, step_codomain_lowercase,
+             theta_np, &theta_flag, theta_capital, theta_lowercase, 
+             thetaQ1_R2[0], thetaQ2_R2[0], 0, 0);
+  
+        for (unsigned j = 0; j < numP; ++j){
+            //theta_isogeny_eval(&pts[j], &step, &pts[j]);
+            theta_isogeny_eval_vec(vecPts[j], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+        }
+        //theta = step.codomain;
+        //theta_isogeny_eval(&thetaQ1[0], &step, &thetaQ1[0]);
+        //theta_isogeny_eval(&thetaQ2[0], &step, &thetaQ2[0]);
+        theta_isogeny_eval_vec(thetaQ1_R2[0], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+        theta_isogeny_eval_vec(thetaQ2_R2[0], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+
+        // ultimate step
+        //theta_isogeny_compute_2(&step, &theta, &thetaQ1[0], &thetaQ2[0], 1, 0);
+        theta_isogeny_compute_2_vec(step_T1_8, step_T2_8, 
+             &step_hadamard_bool_1, &step_hadamard_bool_2,
+             step_domain_np, &step_domain_precomputation, step_domain_capital, step_domain_lowercase,
+             step_precompute, 
+             step_codomain_np, &step_codomain_precomputation, step_codomain_capital, step_codomain_lowercase,
+             step_codomain_np, &step_codomain_precomputation, step_codomain_capital, step_codomain_lowercase, 
+             thetaQ1_R2[0], thetaQ2_R2[0], 1, 0);    
+        for (unsigned j = 0; j < numP; ++j){
+            //theta_isogeny_eval(&pts[j], &step, &pts[j]);
+            theta_isogeny_eval_vec(vecPts[j], step_precompute, step_hadamard_bool_1, step_hadamard_bool_2);
+        }
+        //theta = step.codomain;
+        theta_flag = step_codomain_precomputation;
+        memmove(theta_np, step_codomain_np, sizeof(uint32x4_t)*FP2_LIMBS);
+    }
+    
+    //theta data transform
+    itranspose(&theta.null_point, theta_np);
+    theta_montback(&theta.null_point, &imb);
+    theta.precomputation = theta_flag;
+
+    // final splitting step
+    theta_splitting_t last_step;
+    uint32x4_t split_mm[4][FP2_LIMBS], B_np[FP2_LIMBS];
+    //bool is_split = splitting_compute(&last_step, &theta, extra_torsion ? 8 : -1, randomize);
+    bool is_split = splitting_compute_vec(split_mm, B_np, theta_np, &theta, extra_torsion ? 8 : -1, randomize);
+
+    if (!is_split) {
+        debug_print("kernel did not generate an isogeny between elliptic products");
+        printf("error 6!\n");
+        return 0;
+    }
+
+    itranspose(&last_step.B.null_point, B_np);
+    theta_montback(&last_step.B.null_point, &imb);
+    if (!theta_product_structure_to_elliptic_product(E34, &last_step.B)){
+        printf("error 7!\n");
+        return 0;
+    }
+
+    // evaluate
+    for (size_t j = 0; j < numP; ++j) {
+        // apply_isomorphism(&pts[j], &last_step.M, &pts[j]);
+        apply_isomorphism_vec_1(vecPts[j], split_mm, vecPts[j]);
+        
+        //if (!theta_point_to_montgomery_point(&P12[j], &pts[j], &last_step.B)) return 0;
+        if (!theta_point_to_montgomery_point_vec(vecPts[j], vecPts[j], B_np)){
+            printf("error 8!\n");
+            return 0;
+        }
+        itranspose(&tp, vecPts[j]);
+        theta_montback(&tp, &imb);
+        P12[j].P1.x = tp.x;
+        P12[j].P1.z = tp.y;
+        P12[j].P2.x = tp.z;
+        P12[j].P2.z = tp.t;
+    }
+
+    return 1;
+}
+
+
+
+int
+theta_chain_compute_and_eval(unsigned n,
+                             /*const*/ theta_couple_curve_t *E12,
+                             const theta_kernel_couple_points_t *ker,
+                             bool extra_torsion,
+                             theta_couple_curve_t *E34,
+                             theta_couple_point_t *P12,
+                             size_t numP)
+{
+    //return _theta_chain_compute_impl_ref(n, E12, ker, extra_torsion, E34, P12, numP, false, false);
+    return _theta_chain_compute_impl_randomized(n, E12, ker, extra_torsion, E34, P12, numP, false, false);
+}
+
+// Like theta_chain_compute_and_eval, adding extra verification checks;
+// used in the signature verification
+int
+theta_chain_compute_and_eval_verify(unsigned n,
+                                    /*const*/ theta_couple_curve_t *E12,
+                                    const theta_kernel_couple_points_t *ker,
+                                    bool extra_torsion,
+                                    theta_couple_curve_t *E34,
+                                    theta_couple_point_t *P12,
+                                    size_t numP)
+{
+    //return _theta_chain_compute_impl_ref(n, E12, ker, extra_torsion, E34, P12, numP, true, false);
+    return _theta_chain_compute_impl_randomized(n, E12, ker, extra_torsion, E34, P12, numP, true, false);
+}
+
+int
+theta_chain_compute_and_eval_randomized(unsigned n,
+                                        /*const*/ theta_couple_curve_t *E12,
+                                        const theta_kernel_couple_points_t *ker,
+                                        bool extra_torsion,
+                                        theta_couple_curve_t *E34,
+                                        theta_couple_point_t *P12,
+                                        size_t numP)
+{
+    //return _theta_chain_compute_impl_ref(n, E12, ker, extra_torsion, E34, P12, numP, false, true);
+    return _theta_chain_compute_impl_randomized(n, E12, ker, extra_torsion, E34, P12, numP, false, true);
+}

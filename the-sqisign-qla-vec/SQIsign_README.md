@@ -1,13 +1,3 @@
-# About SQIsign vectorization
-
-This repository is a fork of the SQIsign project. It provides implementations for both [the official SQIsign](https://github.com/SQIsign/the-sqisign) and [Qlapoti](https://github.com/KULeuven-COSIC/Qlapoti/tree/main).
-
-We have introduced several performance enhancements, specifically focusing on:
-* Vectorized finite field arithmetic for SQIsign across three NIST security levels on application and high-performance Arm architectures.
-* Optimized (2,2)-isogeny chain elliptic curve operations based on these vectorized field implementations.
-* Applied to Qlapoti since our improvements are orthogonal to it.
-
-
 # SQIsign
 
 This library is a C implementation of SQIsign.

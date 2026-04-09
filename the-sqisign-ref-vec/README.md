@@ -1,4 +1,4 @@
-# About SQIsign vectorization
+# The official SQIsign vectorization
 
 We have introduced several performance enhancements to the official SQIsign via vectorization.
 
