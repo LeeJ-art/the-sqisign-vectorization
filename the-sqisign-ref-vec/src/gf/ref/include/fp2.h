@@ -43,10 +43,11 @@ void fp2_cswap(fp2_t *a, fp2_t *b, uint32_t ctl);
 
 /*New vectorization*/
 uint32_t fp2_is_zero_32(const uint32x4_t* p, int x);
+void fp2_bactched_reduction(uint32x4_t *out);
 void fp2_add_batched(uint32x4_t* out, uint32x4_t *a, uint32x4_t *b);
 void fp2_sub_batched(uint32x4_t* out, uint32x4_t *a, uint32x4_t *b);
-void to_squared_theta_batched(uint32x4_t* out, uint32x4_t *a);
 void fp2_mul_batched(uint32x4_t *out, uint32x4_t *a, uint32x4_t *b);
 void fp2_sqr_batched(uint32x4_t* b, uint32x4_t *a);
+void fp2_sqrt_vec_batched_2(uint32x4_t *out, uint32x4_t *in);
 
 #endif

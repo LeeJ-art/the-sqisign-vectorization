@@ -1,8 +1,8 @@
 set(SOURCE_FILES_GF_${SVARIANT_UPPER}_REF
     ${SOURCE_FILES_GF_SPECIFIC}
+    ${SOURCE_FILES_GF_SPECIFIC_ASM}
+    ${SOURCE_FILES_GF_SPECIFIC_ASM2}
     ${LVLX_DIR}/fp.c
-    ${LVLX_DIR}/fp_asm.S
-    ${LVLX_DIR}/fp2_asm.S
     ${LVLX_DIR}/fp2.c
 )
 

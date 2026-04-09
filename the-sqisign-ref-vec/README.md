@@ -4,11 +4,26 @@ We have introduced several performance enhancements to the official SQIsign via 
 
 For example, here is our benchmark results for the Cortex-A76.
 
+**NIST I**
 | Algorithm | Ref | VRef | Improvement |
 |--------------|--------:|--------:|--------:|
-| KeyGen  |  72.366M |  47.571M| **1.52x**|
-| Sign    | 164.324M | 109.896M| **1.49x**|
-| Vefify  |  13.735M |   9.267M| **1.48x**|
+| KeyGen  |  72.37M |  47.57M| **1.52x**|
+| Sign    | 164.32M | 109.90M| **1.49x**|
+| Vefify  |  13.74M |   9.27M| **1.48x**|
+
+**NIST III**
+| Algorithm | Ref | VRef | Improvement |
+|--------------|--------:|--------:|--------:|
+| KeyGen  |  206.84M |  138.30M| **1.49x**|
+| Sign    |  473.88M |  322.95M| **1.46x**|
+| Vefify  |   39.97M |   27.89M| **1.43x**|
+
+**NIST V**
+| Algorithm | Ref | VRef | Improvement |
+|--------------|--------:|--------:|--------:|
+| KeyGen  |  405.56M |  945.02M| **1.47x**|
+| Sign    |  275.41M |  656.29M| **1.43x**|
+| Vefify  |   85.12M |   60.34M| **1.41x**|
 
 ## How to build and replicate our result
 ```

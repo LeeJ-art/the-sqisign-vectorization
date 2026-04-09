@@ -113,7 +113,7 @@ bench_sqisign(uint64_t bench)
     printf("\x1b[34mAvg signature: %'" PRIu64 " cycles\x1b[0m\n", (t1 - t0) / bench);
 
 
-    printf("\n\n======================  Verify  ======================\n\n");
+    printf("\n======================  Verify  ======================\n\n");
 
     t = tic();
     t0 = rdtsc();

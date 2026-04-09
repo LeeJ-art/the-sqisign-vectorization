@@ -5,7 +5,6 @@
 #include <bench.h>
 #include <arm_neon.h>
 
-
 static __inline__ uint64_t rdtsc(void)
 {
     return (uint64_t)cpucycles();
@@ -61,8 +60,8 @@ void DBL_vec(uint32x4_t *out1, uint32x4_t *out2, const uint32x4_t *jac1, const u
   // (X/Z^2,Y/Z^3) This version receives the coefficient value A
 
     /*P1.x with r=2**261*/
-    uint32x4_t ax[18], az[18], a0[18], a1[18], a2[18], a3[18], a4[18], a5[18];
-    for (int i=0; i<18; i++){      //ax = [x1, x2, z1, z2]
+    uint32x4_t ax[FP2_LIMBS], az[FP2_LIMBS], a0[FP2_LIMBS], a1[FP2_LIMBS], a2[FP2_LIMBS], a3[FP2_LIMBS], a4[FP2_LIMBS], a5[FP2_LIMBS];
+    for (int i=0; i<FP2_LIMBS; i++){      //ax = [x1, x2, z1, z2]
         ax[i][0] = jac1[i][0];
         ax[i][1] = jac2[i][0];
         ax[i][2] = jac1[i][2];
@@ -71,40 +70,42 @@ void DBL_vec(uint32x4_t *out1, uint32x4_t *out2, const uint32x4_t *jac1, const u
     fp2_sqr_batched(a0, ax); //a0 = [x^2, x^2, z^2, z^2]
 
 
-    for (int i=0; i<18; i++){      //az = [y1, y2, A1, A2]
+    for (int i=0; i<FP2_LIMBS; i++){      //az = [y1, y2, A1, A2]
         az[i][0] = jac1[i][1];
         az[i][1] = jac2[i][1];
         az[i][2] = E1[i][0];
         az[i][3] = E2[i][0];
     }
-    for (int i=0; i<18; i++) a1[i] = vextq_u32(a0[i], az[i], 2);
+    for (int i=0; i<FP2_LIMBS; i++) a1[i] = vextq_u32(a0[i], az[i], 2);
     fp2_sqr_batched(a1, a1); //a1 = [z^4, z^4, y^2, y^2]
          
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a2[i][j] = a0[i][j];
             a2[i][j+2] = a1[i][j+2];
         }
     }
     fp2_add_batched(a1, a1, a2);         // a1 = [alpha, alpha, 2y^2, 2y^2]
+    fp2_bactched_reduction(a1);
 
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a2[i][j+2] = ax[i][j];
-            a0[i][j]   = a0[i][j+2];
+            a0[i][j]   = a0[i][j+2];     // a0 = [z^2, z^2, 2y^2, 2y^2]
             a0[i][j+2] = a1[i][j+2]; 
         }
     }
     fp2_add_batched(a2, a2, a2);         // a2 = [2x^2, 2x^2, 2x, 2x]
 
-    for (int i=0; i<18; i++) a3[i] = vextq_u32(az[i], ax[i], 2);
+    for (int i=0; i<FP2_LIMBS; i++) a3[i] = vextq_u32(az[i], ax[i], 2);
     fp2_mul_batched(a0, a0, a3);         // a0 = [Az^2, Az^2, 2y^2x, 2y^2x]
 
-    for (int i=0; i<18; i++) a4[i] = vextq_u32(a0[i], a2[i], 2);
-    for (int i=0; i<18; i++) a5[i] = vextq_u32(a0[i], a1[i], 2);
+
+    for (int i=0; i<FP2_LIMBS; i++) a4[i] = vextq_u32(a0[i], a2[i], 2);
+    for (int i=0; i<FP2_LIMBS; i++) a5[i] = vextq_u32(a0[i], a1[i], 2);
     fp2_add_batched(a3, a4, a5);         // a3 = [4y^2x, 4y^2x, 3x^2+z^4, 3x^2+z^4]
 
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a0[i][j+2] = a5[i][j+2] = a3[i][j];  //a0 = [Az^2, Az^2, 4y^2x, 4y^2x]
             a5[i][j] = a2[i][j+2];
@@ -112,36 +113,27 @@ void DBL_vec(uint32x4_t *out1, uint32x4_t *out2, const uint32x4_t *jac1, const u
     }
     fp2_add_batched(a2, a0, a5);         // a2 = [(Az1^2 + 2x), (Az1^2 + 2x), 8y^2x, 8y^2x]
 
-    for (int i=0; i<18; i++) a5[i] = vextq_u32(a1[i], a5[i], 2); //a5 = [2y^2, 2y^2, 2x, 2x]
-     for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++) a5[i] = vextq_u32(a1[i], a5[i], 2); //a5 = [2y^2, 2y^2, 2x, 2x]
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a4[i][j] = a2[i][j];  //a4 = [(Az1^2 + 2x), (Az1^2 + 2x), Az^2, Az^2]
             a4[i][j+2] = a0[i][j];
         }
     }
-    prop_2(a5);
-    prop_2(a5+9);
-    a5[0] = vaddq_u32(a5[0], div5(a5+8));
-    a5[9] = vaddq_u32(a5[9], div5(a5+17));
-    prop_2(a4);
-    prop_2(a4+9);
-    a4[0] = vaddq_u32(a4[0], div5(a4+8));
-    a4[9] = vaddq_u32(a4[9], div5(a4+17));
+    fp2_bactched_reduction(a5);
+    fp2_bactched_reduction(a4);
     fp2_mul_batched(a4, a4, a5);         // a4 = [2y^2(Az1^2 + 2x), 2y^2(Az1^2 + 2x), 2xAz^2, 2xAz^2]
 
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a5[i][j] = a4[i][j];
             a5[i][j+2] = a3[i][j+2];  //a5 = [2y^2(Az1^2 + 2x), 2y^2(Az1^2 + 2x), 3x^2+z^4, 3x^2+z^4]
         }
     }
     fp2_add_batched(a4, a4, a5);      // a4 = [4y^2(Az1^2 + 2x), 4y^2(Az1^2 + 2x), alpha, alpha]
-    prop_2(a4);
-    prop_2(a4+9);
-    a4[0] = vaddq_u32(a4[0], div5(a4+8));
-    a4[9] = vaddq_u32(a4[9], div5(a4+17));
+    fp2_bactched_reduction(a4);
 
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a0[i][j] = a4[i][j+2];
             a0[i][j+2] = a1[i][j+2];
@@ -149,110 +141,102 @@ void DBL_vec(uint32x4_t *out1, uint32x4_t *out2, const uint32x4_t *jac1, const u
     }
     fp2_sqr_batched(a0, a0);  //a0 = [alpha^2, alpha^2, 4y^4, 4y^4]
 
-    uint32_t q[9] = {536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 327679};
-    for (int i=0; i<18; i++){
+    uint32_t q[FP_LIMBS];
+    for (int i=0; i<(FP_LIMBS-1); i++) q[i] = Q1_VALUE;
+    q[FP_LIMBS-1] = Q1_VALUE_SIGNIFICANT;
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a1[i][j] = a4[i][j];
             a1[i][j+2] = a0[i][j+2];     //a1 = [4y^2(Az1^2 + 2x), 4y^2(Az1^2 + 2x), 4y^4, 4y^4]
-            a0[i][j+2] = q[i%9];
+            a0[i][j+2] = q[i%FP_LIMBS];
         }
     }
     fp2_sub_batched(a0, a0, a1);        // a0 = [alpha^2 - 4y^2(Az1^2 + 2x), alpha^2 - 4y^2(Az1^2 + 2x), -4y1^4, -4y1^4]
-    prop_2(a0);
-    prop_2(a0+9);
-    a0[0] = vaddq_u32(a0[0], div5(a0+8));
-    a0[9] = vaddq_u32(a0[9], div5(a0+17));
+    fp2_bactched_reduction(a0);
 
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             a3[i][j+2] = a0[i][j+2];     //a3 = [4y^2x, 4y^2x, -4y1^4, -4y1^4]
             a0[i][j+2] = a1[i][j+2];
         }
     }
     fp2_sub_batched(a3, a3, a0);        //a3 = [(4y^2x - Qx), (4y^2x - Qx), -8y1^4, -8y1^4]
-    prop_2(a3);
-    prop_2(a3+9);
-    a3[0] = vaddq_u32(a3[0], div5(a3+8));
-    a3[9] = vaddq_u32(a3[9], div5(a3+17));
+    fp2_bactched_reduction(a3);
 
-    for (int i=0; i<18; i++) a5[i] = vextq_u32(a4[i], az[i], 2); //a5 = [alpha, alpha, y, y]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++) a5[i] = vextq_u32(a4[i], az[i], 2); //a5 = [alpha, alpha, y, y]
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             ax[i][j] = a3[i][j];     //ax = [(4y^2x - Qx), (4y^2x - Qx), z, z]     
         }
     }
     fp2_mul_batched(a1, a5, ax);         // a1 = [Qy, Qy, yz, yz]
 
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         for (int j=0; j<2; j++){
             ax[i][j] = a3[i][j+2];     //ax = [-8y1^4, -8y1^4, yz, yz]
             ax[i][j+2] = a1[i][j+2];      
         }
     }
     fp2_add_batched(a1, a1, ax);        //a1 = [Qy, Qy, Qz, Qz]
-    prop_2(a1);
-    prop_2(a1+9);
-    a1[0] = vaddq_u32(a1[0], div5(a1+8));
-    a1[9] = vaddq_u32(a1[9], div5(a1+17));
+    fp2_bactched_reduction(a1);
 
 
     // -1 if x=0&z=0, else 0
     // in if x=0&z=0, else out 
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         ax[i][0] = jac1[i][0];
         ax[i][1] = jac1[i][2];
         ax[i][2] = jac2[i][0];
         ax[i][3] = jac2[i][2];
     }
-    uint32x4_t flag = vandq_u32(theta_point_is_zero(ax), theta_point_is_zero(ax+9)); //flag = [x, z, x, z]
+    uint32x4_t flag = vandq_u32(theta_point_is_zero(ax), theta_point_is_zero(ax+FP_LIMBS)); //flag = [x, z, x, z]
     az[0] = vdupq_n_u32(flag[0]&flag[1]);
     az[1] = vdupq_n_u32(flag[2]&flag[3]);
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         //out [x_re, x_im, z_re, z_im]
         //in  [x_re, x_im, z_re, z_im]
-        ax[i][0]   = a0[i][0];
-        ax[i+9][0] = jac1[i][0];
-        ax[i][1]   = a0[i+9][0];
-        ax[i+9][1] = jac1[i+9][0];
-        ax[i][2]   = a1[i][2];
-        ax[i+9][2] = jac1[i][2];
-        ax[i][3]   = a1[i+9][2];
-        ax[i+9][3] = jac1[i+9][2];
+        ax[i][0]            = a0[i][0];
+        ax[i+FP_LIMBS][0]   = jac1[i][0];
+        ax[i][1]            = a0[i+FP_LIMBS][0];
+        ax[i+FP_LIMBS][1]   = jac1[i+FP_LIMBS][0];
+        ax[i][2]            = a1[i][2];
+        ax[i+FP_LIMBS][2]   = jac1[i][2];
+        ax[i][3]            = a1[i+FP_LIMBS][2];
+        ax[i+FP_LIMBS][3]   = jac1[i+FP_LIMBS][2];
     }
     fp2_select_vec(a2, ax, az[0]);
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         //x y z
-        out1[i][0]   = a2[i][0];
-        out1[i+9][0] = a2[i][1];
-        out1[i][1]   = a1[i][0];
-        out1[i+9][1] = a1[i+9][0];
-        out1[i][2]   = a2[i][2];
-        out1[i+9][2] = a2[i][3];
+        out1[i][0]          = a2[i][0];
+        out1[i+FP_LIMBS][0] = a2[i][1];
+        out1[i][1]          = a1[i][0];
+        out1[i+FP_LIMBS][1] = a1[i+FP_LIMBS][0];
+        out1[i][2]          = a2[i][2];
+        out1[i+FP_LIMBS][2] = a2[i][3];
     }
 
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         //out [x_re, x_im, z_re, z_im]
         //in  [x_re, x_im, z_re, z_im]
-        ax[i][0]   = a0[i][1];
-        ax[i+9][0] = jac2[i][0];
-        ax[i][1]   = a0[i+9][1];
-        ax[i+9][1] = jac2[i+9][0];
-        ax[i][2]   = a1[i][3];
-        ax[i+9][2] = jac2[i][2];
-        ax[i][3]   = a1[i+9][3];
-        ax[i+9][3] = jac2[i+9][2];
+        ax[i][0]          = a0[i][1];
+        ax[i+FP_LIMBS][0] = jac2[i][0];
+        ax[i][1]          = a0[i+FP_LIMBS][1];
+        ax[i+FP_LIMBS][1] = jac2[i+FP_LIMBS][0];
+        ax[i][2]          = a1[i][3];
+        ax[i+FP_LIMBS][2] = jac2[i][2];
+        ax[i][3]          = a1[i+FP_LIMBS][3];
+        ax[i+FP_LIMBS][3] = jac2[i+FP_LIMBS][2];
     }
     fp2_select_vec(a2, ax, az[1]);
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         //x y z
-        out2[i][0]   = a2[i][0];
-        out2[i+9][0] = a2[i][1];
-        out2[i][1]   = a1[i][1];
-        out2[i+9][1] = a1[i+9][1];
-        out2[i][2]   = a2[i][2];
-        out2[i+9][2] = a2[i][3];
+        out2[i][0]          = a2[i][0];
+        out2[i+FP_LIMBS][0] = a2[i][1];
+        out2[i][1]          = a1[i][1];
+        out2[i+FP_LIMBS][1] = a1[i+FP_LIMBS][1];
+        out2[i][2]          = a2[i][2];
+        out2[i+FP_LIMBS][2] = a2[i][3];
     }
-    
 }
 
 
@@ -262,22 +246,21 @@ void DBLW_vec(uint32x4_t *out)
   // (X:Y:Z:T=a*Z^4) corresponding to (X/Z^2,Y/Z^3), where a is the curve coefficient.
   // Formula from https://hyperelliptic.org/EFD/g1p/auto-shortw-modified.html
 
-    uint32x4_t ax[18], az[18], a1[18], a2[18], a3[18], TR[18], tmp[18];
-    uint32x4_t reCarry, imCarry;
+    uint32x4_t ax[FP2_LIMBS], az[FP2_LIMBS], a1[FP2_LIMBS], a2[FP2_LIMBS], a3[FP2_LIMBS], TR[FP2_LIMBS], tmp[FP2_LIMBS];
 
     // uint32_t flag = fp2_is_zero(&in->P1.x) & fp2_is_zero(&in->P1.z);
     // uint32_t flag2 = fp2_is_zero(&in->P2.x) & fp2_is_zero(&in->P2.z);
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         tmp[i][0] = out[i][0];
-        tmp[i][1] = out[i+18][1];
+        tmp[i][1] = out[i+FP2_LIMBS][1];
         tmp[i][2] = out[i][2];
-        tmp[i][3] = out[i+18][3];
-        tmp[i+9][0] = out[i+9][0];
-        tmp[i+9][1] = out[i+27][1];
-        tmp[i+9][2] = out[i+9][2];
-        tmp[i+9][3] = out[i+27][3];
+        tmp[i][3] = out[i+FP2_LIMBS][3];
+        tmp[i+FP_LIMBS][0] = out[i+FP_LIMBS][0];
+        tmp[i+FP_LIMBS][1] = out[i+FP2_LIMBS+FP_LIMBS][1];
+        tmp[i+FP_LIMBS][2] = out[i+FP_LIMBS][2];
+        tmp[i+FP_LIMBS][3] = out[i+FP2_LIMBS+FP_LIMBS][3];
     }
-    uint32x4_t flag = vandq_u32(theta_point_is_zero(tmp), theta_point_is_zero(tmp+9));
+    uint32x4_t flag = vandq_u32(theta_point_is_zero(tmp), theta_point_is_zero(tmp+FP_LIMBS));
 
 
     // fp2_sqr(&xx, &out->P1.x);               //xx = x^2   [4y+3] 
@@ -292,11 +275,7 @@ void DBLW_vec(uint32x4_t *out)
     // fp2_add(&m2, &xx2, &xx2);                //m = 2x^2   [4y+3]
     // fp2_add(&c2, &c2, &c2);                  //c = 2y^2   [2y+1]
     fp2_add_batched(a2, a1, a1);
-    prop_2(a2);
-    prop_2(a2+9);
-    reCarry = div5(a2+8), imCarry = div5(a2+17);
-    a2[0] = vaddq_u32(a2[0], reCarry);
-    a2[9] = vaddq_u32(a2[9], imCarry);
+    fp2_bactched_reduction(a2);
 
 
     // fp2_add(&m, &m, &t[0]);                  //xx = 2x^2+t [4y+3]
@@ -304,26 +283,26 @@ void DBLW_vec(uint32x4_t *out)
     // fp2_add(&m2, &m2, &t[1]);                //xx = 2x^2+t [4y+3]
     // fp2_add(&d2, &c2, &c2);                  //d = 4y^2    [2y+1]
     /*It must requires to do reduction since 4y^2 is 4 times 29-bit*/
-    for (int i=0; i<18; i++){
-        a3[i][0] = (out+18)[i][0];
-        a3[i][2] = (out+18)[i][2];
+    for (int i=0; i<FP2_LIMBS; i++){
+        a3[i][0] = (out+FP2_LIMBS)[i][0];
+        a3[i][2] = (out+FP2_LIMBS)[i][2];
         a3[i][1] = a2[i][1];
         a3[i][3] = a2[i][3];
     }
     fp2_add_batched(a3, a2, a3);
+    fp2_bactched_reduction(a3);
 
-   
     // fp2_mul(&d, &d, &out->P1.x);                    //d = 4y^2x  [4y+3]
     // fp2_mul(&out->P1.z, &out->P1.y, &out->P1.z);    //r = yz     [2y+1]
     // fp2_mul(&d2, &d2, &out->P2.x);                  //d = 4y^2x  [4y+3]
     // fp2_mul(&out->P2.z, &out->P2.y, &out->P2.z);    //r = yz     [2y+1]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         a2[i][0] = a3[i][0];
         a2[i][2] = a3[i][2];
         a3[i][0] = a3[i][1];
         a3[i][2] = a3[i][3];
-        a3[i][1] = (out+18)[i][1];
-        a3[i][3] = (out+18)[i][3];
+        a3[i][1] = (out+FP2_LIMBS)[i][1];
+        a3[i][3] = (out+FP2_LIMBS)[i][3];
     }
     fp2_mul_batched(ax, a3, out);
     
@@ -332,25 +311,21 @@ void DBLW_vec(uint32x4_t *out)
     // fp2_add(&out->P1.z, &out->P1.z, &out->P1.z);    //outz = 2yz [2y+1]
     // fp2_add(&m2, &m2, &xx2);                        //m = 3x^2+t [4y+3]
     // fp2_add(&out->P2.z, &out->P2.z, &out->P2.z);    //outz = 2yz [2y+1]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         a1[i][1] = a3[i][1] = ax[i][1];                //a1 = [x^2, yz, x^2, yz]
         a1[i][3] = a3[i][3] = ax[i][3];                //a3 = [2x^2+t, yz, 2x^2+t, yz]
         a3[i][0] = a2[i][0];
         a3[i][2] = a2[i][2];
     }
     fp2_add_batched(TR, a1, a3);
-    prop_2(TR);
-    prop_2(TR+9);
-    reCarry = div5(TR+8), imCarry = div5(TR+17);
-    TR[0] = vaddq_u32(TR[0], reCarry);
-    TR[9] = vaddq_u32(TR[9], imCarry);
+    fp2_bactched_reduction(TR);
 
 
     // fp2_sqr(&out->P1.x, &m);                    //outx = m^2 [8y+7]
     // fp2_sqr(&cc, &c);                           //cc = 4y^4  [4y+3]
     // fp2_sqr(&out->P2.x, &m2);                   //outx = m^2 [8y+7]
     // fp2_sqr(&cc2, &c2);                         //cc = 4y^4  [4y+3]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         a2[i][0] = TR[i][0];
         a2[i][2] = TR[i][2];
     }
@@ -361,18 +336,14 @@ void DBLW_vec(uint32x4_t *out)
     // fp2_add(&out->P1.y, &cc, &cc);          //outy = 8y^4   [4y+3]
     // fp2_add(&s2, &d2, &d2);                 //s = 8y^2x     [4y+3]
     // fp2_add(&out->P2.y, &cc2, &cc2);        //outy = 8y^4   [4y+3]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         ax[i][1] = a2[i][1];
         ax[i][3] = a2[i][3];
         a2[i][1] = ax[i][0];
         a2[i][3] = ax[i][2];
     }
     fp2_add_batched(ax, ax, ax);
-    prop_2(ax);
-    prop_2(ax+9);
-    reCarry = div5(ax+8), imCarry = div5(ax+17);
-    ax[0] = vaddq_u32(ax[0], reCarry);
-    ax[9] = vaddq_u32(ax[9], imCarry);
+    fp2_bactched_reduction(ax);
 
     
 
@@ -380,7 +351,7 @@ void DBLW_vec(uint32x4_t *out)
     // fp2_sub(&out->P1.x, &out->P1.x, &d);        //outx = m^2 - 4y^2x 
     // fp2_sub(&s2, &s2, &out->P2.x);              //s = 8y^2x - m^2 [4y+3]
     // fp2_sub(&out->P2.x, &out->P2.x, &d2);       //outx = m^2 - 4y^2x
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         a3[i][0] = ax[i][0];
         a3[i][2] = ax[i][2];
         a3[i][1] = a2[i][0];
@@ -393,34 +364,30 @@ void DBLW_vec(uint32x4_t *out)
     // fp2_add(&s, &s, &d);                        //s = 12y^2x - m^2 [4y+3]
     // fp2_add(&t[1], &t[1], &t[1]);               //t = 2t    [4y+3]
     // fp2_add(&s2, &s2, &d2);                     //s = 12y^2x - m^2 [4y+3]
-    for (int i=0; i<18; i++){
-        a2[i][0] = (out+18)[i][0];
-        a2[i][2] = (out+18)[i][2];
-        tmp[i][0] = (out+18)[i][0];
+    for (int i=0; i<FP2_LIMBS; i++){
+        a2[i][0]  = (out+FP2_LIMBS)[i][0];
+        a2[i][2]  = (out+FP2_LIMBS)[i][2];
+        tmp[i][0] = (out+FP2_LIMBS)[i][0];
         tmp[i][1] = a3[i][0];
-        tmp[i][2] = (out+18)[i][2];
+        tmp[i][2] = (out+FP2_LIMBS)[i][2];
         tmp[i][3] = a3[i][2];
     }
     fp2_add_batched(az, a2, tmp);
-    prop_2(az);
-    prop_2(az+9);
-    reCarry = div5(az+8), imCarry = div5(az+17);
-    az[0] = vaddq_u32(az[0], reCarry);
-    az[9] = vaddq_u32(az[9], imCarry);
+    fp2_bactched_reduction(az);
 
 
     // fp2_mul(&t[0], &t[0], &out->P1.y);          //t = 2t(8y^4) [8y+7]
     // fp2_mul(&m, &m, &s);                        //m = m(12y^2x - m^2)   [8y+7]
     // fp2_mul(&t[1], &t[1], &out->P2.y);          //t = 2t(8y^4) [8y+7]
     // fp2_mul(&m2, &m2, &s2);                     //m = m(12y^2x - m^2)   [8y+7]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         a1[i][1] = TR[i][0];
         a1[i][3] = TR[i][2];
         a1[i][0] = ax[i][1];
         a1[i][2] = ax[i][3];
     }
     fp2_mul_batched(az, a1, az);
-    for (int i=0; i<18; i++){                  //TR = [t, z, t, z]
+    for (int i=0; i<FP2_LIMBS; i++){                  //TR = [t, z, t, z]
         TR[i][0] = az[i][0];
         TR[i][2] = az[i][2];
     }
@@ -430,17 +397,14 @@ void DBLW_vec(uint32x4_t *out)
     // fp2_sub(&out->P1.y, &m, &out->P1.y);    //outy = m(12y^2x - m^2) - (8y^4) [8y+7]
     // fp2_sub(&out->P2.x, &out->P2.x, &d2);   //outx = (m^2 - 4y^2x) - 4y^2x [8y+7]
     // fp2_sub(&out->P2.y, &m2, &out->P2.y);   //outy = m(12y^2x - m^2) - (8y^4) [8y+7]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         az[i][0] = a3[i][1];
         az[i][2] = a3[i][3];
         ax[i][0] = a2[i][1];
         ax[i][2] = a2[i][3];
     }
     fp2_sub_batched(tmp, az, ax);           //tmp = [x, y, x, y]
-    prop_2(tmp);
-    prop_2(tmp+9);  
-    tmp[0] = vaddq_u32(tmp[0], div5(tmp+8));
-    tmp[9] = vaddq_u32(tmp[9], div5(tmp+17));
+    fp2_bactched_reduction(tmp);
 
 
     // fp2_select(&Q->x, &Q->x, &P->x, -flag);
@@ -449,56 +413,56 @@ void DBLW_vec(uint32x4_t *out)
     // out1 = [x, y, x, y]; out2 = [t, z, t, z]
     az[0] = vdupq_n_u32(flag[0]&flag[1]);
     az[1] = vdupq_n_u32(flag[2]&flag[3]);
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         //out(Q) [x_re, x_im, z_re, z_im]
         //in(P)  [x_re, x_im, z_re, z_im]
-        ax[i][0]   = tmp[i][0];
-        ax[i+9][0] = out[i][0];
-        ax[i][1]   = tmp[i+9][0];
-        ax[i+9][1] = out[i+9][0];
-        ax[i][2]   = TR[i][1];
-        ax[i+9][2] = out[i+18][1];
-        ax[i][3]   = TR[i+9][1];
-        ax[i+9][3] = out[i+27][1];
+        ax[i][0]            = tmp[i][0];
+        ax[i+FP_LIMBS][0]   = out[i][0];
+        ax[i][1]            = tmp[i+FP_LIMBS][0];
+        ax[i+FP_LIMBS][1]   = out[i+FP_LIMBS][0];
+        ax[i][2]            = TR[i][1];
+        ax[i+FP_LIMBS][2]   = out[i+FP2_LIMBS][1];
+        ax[i][3]            = TR[i+FP_LIMBS][1];
+        ax[i+FP_LIMBS][3]   = out[i+FP2_LIMBS+FP_LIMBS][1];
     }
     fp2_select_vec(a2, ax, az[0]);
-    for (int i=0; i<9; i++){
-        out[i][0]   = a2[i][0];
-        out[i+9][0] = a2[i][1];
-        out[i][1]   = tmp[i][1];
-        out[i+9][1] = tmp[i+9][1];
+    for (int i=0; i<FP_LIMBS; i++){
+        out[i][0]           = a2[i][0];
+        out[i+FP_LIMBS][0]  = a2[i][1];
+        out[i][1]           = tmp[i][1];
+        out[i+FP_LIMBS][1]  = tmp[i+FP_LIMBS][1];
 
-        out[i+18][0] = TR[i][0];
-        out[i+27][0] = TR[i+9][0];
-        out[i+18][1] = a2[i][2];
-        out[i+27][1] = a2[i][3];
+        out[i+FP2_LIMBS][0]          = TR[i][0];
+        out[i+FP2_LIMBS+FP_LIMBS][0] = TR[i+FP_LIMBS][0];
+        out[i+FP2_LIMBS][1]          = a2[i][2];
+        out[i+FP2_LIMBS+FP_LIMBS][1] = a2[i][3];
     }
 
     // fp2_select(&Q->x, &Q->x, &P->x, -flag);
     // fp2_select(&Q->z, &Q->z, &P->z, -flag);
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         //out(Q) [x_re, x_im, z_re, z_im]
         //in(P)  [x_re, x_im, z_re, z_im]
-        ax[i][0]   = tmp[i][2];
-        ax[i+9][0] = out[i][2];
-        ax[i][1]   = tmp[i+9][2];
-        ax[i+9][1] = out[i+9][2];
-        ax[i][2]   = TR[i][3];
-        ax[i+9][2] = out[i+18][3];
-        ax[i][3]   = TR[i+9][3];
-        ax[i+9][3] = out[i+27][3];
+        ax[i][0]            = tmp[i][2];
+        ax[i+FP_LIMBS][0]   = out[i][2];
+        ax[i][1]            = tmp[i+FP_LIMBS][2];
+        ax[i+FP_LIMBS][1]   = out[i+FP_LIMBS][2];
+        ax[i][2]            = TR[i][3];
+        ax[i+FP_LIMBS][2]   = out[i+FP2_LIMBS][3];
+        ax[i][3]            = TR[i+FP_LIMBS][3];
+        ax[i+FP_LIMBS][3]   = out[i+FP2_LIMBS+FP_LIMBS][3];
     }
     fp2_select_vec(a2, ax, az[1]);
-    for (int i=0; i<9; i++){
-        out[i][2]   = a2[i][0];
-        out[i+9][2] = a2[i][1];
-        out[i][3]   = tmp[i][3];
-        out[i+9][3] = tmp[i+9][3];
+    for (int i=0; i<FP_LIMBS; i++){
+        out[i][2]          = a2[i][0];
+        out[i+FP_LIMBS][2] = a2[i][1];
+        out[i][3]          = tmp[i][3];
+        out[i+FP_LIMBS][3] = tmp[i+FP_LIMBS][3];
 
-        out[i+18][2] = TR[i][2];
-        out[i+27][2] = TR[i+9][2];
-        out[i+18][3] = a2[i][2];
-        out[i+27][3] = a2[i][3];
+        out[i+FP2_LIMBS][2]          = TR[i][2];
+        out[i+FP2_LIMBS+FP_LIMBS][2] = TR[i+FP_LIMBS][2];
+        out[i+FP2_LIMBS][3]          = a2[i][2];
+        out[i+FP2_LIMBS+FP_LIMBS][3] = a2[i][3];
     }
 }
 
@@ -561,27 +525,27 @@ jac_to_ws_vec(uint32x4_t *out1, uint32x4_t *out2, uint32x4_t *ta,
     // fp_div3(&(ao3->im), &(curve1->A.im));
     // fp_div3(&(ao3->re), &(curve2->A.re));
     // fp_div3(&(ao3->im), &(curve2->A.im));
-    uint32_t THREE_INV_VEC[9] = {357914487, 178956970, 357913941, 178956970, 357913941, 178956970, 357913941, 178956970, 152917};
-    uint32x4_t ao3[18] = {0}, tmp[18], ax[18];
-    for (int i=0; i<9; i++){
+    uint32_t inv3[] = THREE_INV_VEC;
+    uint32x4_t ao3[FP2_LIMBS] = {0}, tmp[FP2_LIMBS], ax[FP2_LIMBS];
+    for (int i=0; i<FP_LIMBS; i++){
         ao3[i][0] = E1[i][0];
-        ao3[i][1] = E1[i+9][0];
+        ao3[i][1] = E1[i+FP_LIMBS][0];
         ao3[i][2] = E2[i][0];
-        ao3[i][3] = E2[i+9][0];
-        tmp[i] = vdupq_n_u32(THREE_INV_VEC[i]);
+        ao3[i][3] = E2[i+FP_LIMBS][0];
+        tmp[i] = vdupq_n_u32(inv3[i]);
     }
     fp_mul_batched((uint32x2_t*)ao3, ao3, tmp);    //ao3 = [A/3, A/3, 0, 0]
-    for (int i=0; i<9; i++){
-        ao3[i+9][0] = ao3[i][1];
+    for (int i=0; i<FP_LIMBS; i++){
+        ao3[i+FP_LIMBS][0] = ao3[i][1];
         ao3[i][1]   = ao3[i][2];
-        ao3[i+9][1] = ao3[i][3];
-        ao3[i][2] = ao3[i+9][2] = ao3[i][3] = ao3[i+9][3] = 0;
+        ao3[i+FP_LIMBS][1] = ao3[i][3];
+        ao3[i][2] = ao3[i+FP_LIMBS][2] = ao3[i][3] = ao3[i+FP_LIMBS][3] = 0;
     }
 
     // fp2_sqr(t, &P->z);                      // t  = z^2
     // fp2_sqr(t, &P->z);                      // t  = z^2
-    uint32x4_t t[18];
-    for (int i=0; i<18; i++){
+    uint32x4_t t[FP2_LIMBS];
+    for (int i=0; i<FP2_LIMBS; i++){
         t[i][0] = jac1[i][2];
         t[i][1] = jac2[i][2];
         t[i][2] = t[i][3] = 0;
@@ -594,22 +558,19 @@ jac_to_ws_vec(uint32x4_t *out1, uint32x4_t *out2, uint32x4_t *ta,
 
     // fp2_add(&Q->x, &Q->x, &P->x);           // Qx = Px + Az^2/3
     // fp2_add(&Q->x, &Q->x, &P->x);           // Qx = Px + Az^2/3
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         ax[i][0] = jac1[i][0];
         ax[i][1] = jac2[i][0];
         ax[i][2] = ax[i][3] = 0;
     }
     fp2_add_batched(tmp, tmp, ax);   //tmp = [x+Az^2/3, x+Az^2/3, 0, 0]
-    prop_2(tmp);
-    prop_2(tmp+9);
-    tmp[0] = vaddq_u32(tmp[0], div5(tmp+8));
-    tmp[9] = vaddq_u32(tmp[9], div5(tmp+17));
+    fp2_bactched_reduction(tmp);
 
     // fp2_sqr(t, t);                          // t  = z^4
     // fp2_sqr(t, t);                          // t  = z^4
     // fp2_mul(&a, ao3, &(curve->A));          // a  = A^2/3
     // fp2_mul(&a, ao3, &(curve->A));          // a  = A^2/3
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         t[i][2] = ao3[i][0];
         t[i][3] = ao3[i][1];
 
@@ -625,43 +586,44 @@ jac_to_ws_vec(uint32x4_t *out1, uint32x4_t *out2, uint32x4_t *ta,
     // fp_neg(&(a.im), &(a.im));               // a_im  = 0 - A^2/3
     // fp_sub(&(a.re), &one, &(a.re));         // a_re  = 1 - A^2/3
     // fp_neg(&(a.im), &(a.im));               // a_im  = 0 - A^2/3
-    uint32_t q0[9] = {536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 327679};
-    uint32_t q1[9] = {536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 536870911, 537198591};
-    for (int i=0; i<9; i++){
+    //q0 = q, q1 = (2^{PER_LIMB*FP_LIMBS}+q)%q
+    uint32_t q0[FP_LIMBS], q1[FP_LIMBS];
+    for (int i=0; i<(FP_LIMBS-1); i++) q0[i] = Q1_VALUE;
+    q0[FP_LIMBS-1] = Q1_VALUE_SIGNIFICANT;
+    initial_q_value_1(q1);
+    
+    for (int i=0; i<FP_LIMBS; i++){
         t[i][0] = q1[i];
         t[i][1] = q0[i];
         t[i][2] = q1[i];
         t[i][3] = q0[i];
 
         ax[i][0] = ta[i][2];
-        ax[i][1] = ta[i+9][2];
+        ax[i][1] = ta[i+FP_LIMBS][2];
         ax[i][2] = ta[i][3];
-        ax[i][3] = ta[i+9][3];
+        ax[i][3] = ta[i+FP_LIMBS][3];
     }
-    for (int i=0; i<9; i++){                   // t = [1 - A^2/3, 0 - A^2/3, 1 - A^2/3, 0 - A^2/3]
-        t[i] = vsubq_u32(t[i], ax[i]);
-    }
-    prop_2(t);
-    t[0] = vaddq_u32(t[0], div5(t+8));
+    fp_sub_batched(t, t, ax);                 // t = [1 - A^2/3, 0 - A^2/3, 1 - A^2/3, 0 - A^2/3]
+    fp_bactched_reduction(t);
     
     // fp2_mul(t, t, &a);                      // t_re = (t_re*a_re) - (t_im*a_im); t_im = (t_im*a_re) - (t_re*a_im)
     // fp2_mul(t, t, &a);                      // t_re = (t_re*a_re) - (t_im*a_im); t_im = (t_im*a_re) - (t_re*a_im)
-    for (int i=0; i<9; i++){
+    for (int i=0; i<FP_LIMBS; i++){
         ax[i][0]   = t[i][0];
-        ax[i+9][0] = t[i][1];
+        ax[i+FP_LIMBS][0] = t[i][1];
         ax[i][1]   = t[i][2];
-        ax[i+9][1] = t[i][3];
-        ax[i][2] = ax[i+9][2] = ax[i][3] = ax[i+9][3] = 0;
+        ax[i+FP_LIMBS][1] = t[i][3];
+        ax[i][2] = ax[i+FP_LIMBS][2] = ax[i][3] = ax[i+FP_LIMBS][3] = 0;
     }
     fp2_mul_batched(ta, ta, ax);     //ta = [t1, t2, a1, a2]
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         ta[i][2] = ao3[i][0];
         ta[i][3] = ao3[i][1];
     }
 
     // fp2_copy(&Q->y, &P->y);
     // fp2_copy(&Q->z, &P->z);
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         out1[i][0] = tmp[i][0];
         out1[i][1] = jac1[i][1];
         out1[i][2] = jac1[i][2];
@@ -681,8 +643,8 @@ jac_from_ws_vec(uint32x4_t *out1, uint32x4_t *out2, const uint32x4_t *in1, const
     
     // fp2_sqr(&t, &P->z);
     // fp2_sqr(&t, &P->z);
-    uint32x4_t tmp[18], ao3[18];
-    for (int i=0; i<18; i++){
+    uint32x4_t tmp[FP2_LIMBS], ao3[FP2_LIMBS];
+    for (int i=0; i<FP2_LIMBS; i++){
         tmp[i][0] = in1[i][2];
         tmp[i][1] = in2[i][2];
         tmp[i][2] = tmp[i][3] = 0;
@@ -699,22 +661,19 @@ jac_from_ws_vec(uint32x4_t *out1, uint32x4_t *out2, const uint32x4_t *in1, const
 
     // fp2_sub(&Q->x, &P->x, &t);
     // fp2_sub(&Q->x, &P->x, &t);
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         tmp[i][0] = in1[i][0];
         tmp[i][1] = in2[i][0];
         tmp[i][2] = tmp[i][3] = 0;
     }
     fp2_sub_batched(tmp, tmp, ao3);
-    prop_2(tmp);
-    prop_2(tmp+9);
-    tmp[0] = vaddq_u32(tmp[0], div5(tmp+8));
-    tmp[9] = vaddq_u32(tmp[9], div5(tmp+17));
+    fp2_bactched_reduction(tmp);
     
     // fp2_copy(&Q->y, &P->y);
     // fp2_copy(&Q->z, &P->z);
     // fp2_copy(&Q->y, &P->y);
     // fp2_copy(&Q->z, &P->z);
-    for (int i=0; i<18; i++){
+    for (int i=0; i<FP2_LIMBS; i++){
         out1[i][0] = tmp[i][0];
         out1[i][1] = in1[i][1];
         out1[i][2] = in1[i][2];
@@ -735,15 +694,15 @@ void double_couple_jac_point_iter_vec(uint32x4_t *out1, uint32x4_t *out2,
                         const uint32x4_t *E1, const uint32x4_t *E2)
 {
     if (n == 0) {
-        memcpy(out1, jac1, 18*sizeof(uint32x4_t));
-        memcpy(out2, jac2, 18*sizeof(uint32x4_t));
+        memcpy(out1, jac1, FP2_LIMBS*sizeof(uint32x4_t));
+        memcpy(out2, jac2, FP2_LIMBS*sizeof(uint32x4_t));
     } else if (n == 1) {
         double_couple_jac_point_vec(out1, out2, jac1, jac2, E1, E2);
     } else {
         // fp2_t a1, a2, t1, t2;
         // jac_to_ws(&out->P1, &t1, &a1, &in->P1, &E1E2->E1);
         // jac_to_ws(&out->P2, &t2, &a2, &in->P2, &E1E2->E2);
-        uint32x4_t ta[18]; //[t1, t2, a1, a2]
+        uint32x4_t ta[FP2_LIMBS]; //[t1, t2, a1, a2]
         jac_to_ws_vec(out1, out2, ta, jac1, jac2, E1, E2);
 
         // DBLW(&out->P2, &t2, &out->P2, &t2);
@@ -752,31 +711,31 @@ void double_couple_jac_point_iter_vec(uint32x4_t *out1, uint32x4_t *out2,
         //     DBLW(&out->P2, &t2, &out->P2, &t2);
         // }
         // [x, y, x, y]; [t, z, t, z]
-        uint32x4_t tmp[36];
-        for (int i=0; i<18; i++){
+        uint32x4_t tmp[FP2_LIMBS*2];
+        for (int i=0; i<FP2_LIMBS; i++){
             tmp[i][0] = out1[i][0];
             tmp[i][1] = out1[i][1];
             tmp[i][2] = out2[i][0];
             tmp[i][3] = out2[i][1];
 
-            tmp[i+18][0] = ta[i][0];
-            tmp[i+18][1] = out1[i][2];
-            tmp[i+18][2] = ta[i][1];
-            tmp[i+18][3] = out2[i][2];
+            tmp[i+FP2_LIMBS][0] = ta[i][0];
+            tmp[i+FP2_LIMBS][1] = out1[i][2];
+            tmp[i+FP2_LIMBS][2] = ta[i][1];
+            tmp[i+FP2_LIMBS][3] = out2[i][2];
         }
         DBLW_vec(tmp);
         for (unsigned i = 0; i < n - 1; i++) {
             DBLW_vec(tmp);
         }
         //correct position: x y z
-        for (int i=0; i<18; i++){
+        for (int i=0; i<FP2_LIMBS; i++){
             out1[i][0] = tmp[i][0];
             out1[i][1] = tmp[i][1];
-            out1[i][2] = tmp[i+18][1];
+            out1[i][2] = tmp[i+FP2_LIMBS][1];
 
             out2[i][0] = tmp[i][2];
             out2[i][1] = tmp[i][3];
-            out2[i][2] = tmp[i+18][3];
+            out2[i][2] = tmp[i+FP2_LIMBS][3];
         }
 
         // jac_from_ws(&out->P1, &out->P1, &a1, &E1E2->E1);
@@ -886,24 +845,25 @@ int xDBLMUL_vec(ec_point_t *S,
     select_point(&R[2], Q, P, maskk);
 
     theta_point_t tp;
-    fp_t ExMod = {1638, 0, 0, 0, 35184372088832};
-    uint32x4_t In32[18], DIFF1a32[9], DIFF1b32[9], DIFF2a32[9], DIFF2b32[9];
+    fp_t mb, imb;
+    initial_montback_array(&mb, &imb);
+    uint32x4_t In32[FP2_LIMBS], DIFF1a32[FP_LIMBS], DIFF1b32[FP_LIMBS], DIFF2a32[FP_LIMBS], DIFF2b32[FP_LIMBS];
     tp.x = R[1].x;
     tp.y = R[1].z;
     tp.z = R[2].x;
     tp.t = R[2].z;
-    theta_montback(&tp, &ExMod);
+    theta_montback(&tp, &mb);
     transpose(In32, tp);
-    for (i=0; i<9; i++){
+    for (i=0; i<FP_LIMBS; i++){
         DIFF1a32[i][0] = In32[i][0];
-        DIFF1a32[i][1] = In32[i+9][0];
+        DIFF1a32[i][1] = In32[i+FP_LIMBS][0];
         DIFF1a32[i][2] = In32[i][1];
-        DIFF1a32[i][3] = In32[i+9][1];
+        DIFF1a32[i][3] = In32[i+FP_LIMBS][1];
 
         DIFF1b32[i][0] = In32[i][2];
-        DIFF1b32[i][1] = In32[i+9][2];
+        DIFF1b32[i][1] = In32[i+FP_LIMBS][2];
         DIFF1b32[i][2] = In32[i][3];
-        DIFF1b32[i][3] = In32[i+9][3];
+        DIFF1b32[i][3] = In32[i+FP_LIMBS][3];
     }
 
     // Initialize DIFF2a <- P+Q, DIFF2b <- P-Q
@@ -916,77 +876,76 @@ int xDBLMUL_vec(ec_point_t *S,
     tp.y = R[2].z;
     tp.z = PQ->x;
     tp.t = PQ->z;
-    theta_montback(&tp, &ExMod);
+    theta_montback(&tp, &mb);
     transpose(In32, tp);
-    for (i=0; i<9; i++){
+    for (i=0; i<FP_LIMBS; i++){
         DIFF2a32[i][0] = In32[i][0];
-        DIFF2a32[i][1] = In32[i+9][0];
+        DIFF2a32[i][1] = In32[i+FP_LIMBS][0];
         DIFF2a32[i][2] = In32[i][1];
-        DIFF2a32[i][3] = In32[i+9][1];
+        DIFF2a32[i][3] = In32[i+FP_LIMBS][1];
 
         DIFF2b32[i][0] = In32[i][2];
-        DIFF2b32[i][1] = In32[i+9][2];
+        DIFF2b32[i][1] = In32[i+FP_LIMBS][2];
         DIFF2b32[i][2] = In32[i][3];
-        DIFF2b32[i][3] = In32[i+9][3];
+        DIFF2b32[i][3] = In32[i+FP_LIMBS][3];
     }
 
     A_is_zero = fp2_is_zero(&curve->A);
 
-    uint32x4_t R01[18], R12[18], A24[18], Arith1[18], Arith2[18];
+    uint32x4_t R01[FP2_LIMBS], R12[FP2_LIMBS], A24[FP2_LIMBS], Arith1[FP2_LIMBS], Arith2[FP2_LIMBS];
     tp.x = R[0].x;
     tp.y = R[0].z;
     tp.z = R[1].x;
     tp.t = R[1].z;
-    theta_montback(&tp, &ExMod);
+    theta_montback(&tp, &mb);
     transpose(In32, tp);
-    for (i=0; i<9; i++){
+    for (i=0; i<FP_LIMBS; i++){
         R01[i][0] = In32[i][0];
-        R01[i][1] = In32[i+9][0];
+        R01[i][1] = In32[i+FP_LIMBS][0];
         R01[i][2] = In32[i][1];
-        R01[i][3] = In32[i+9][1];
+        R01[i][3] = In32[i+FP_LIMBS][1];
 
-        R01[i+9][0] = In32[i][2];
-        R01[i+9][1] = In32[i+9][2];
-        R01[i+9][2] = In32[i][3];
-        R01[i+9][3] = In32[i+9][3];
+        R01[i+FP_LIMBS][0] = In32[i][2];
+        R01[i+FP_LIMBS][1] = In32[i+FP_LIMBS][2];
+        R01[i+FP_LIMBS][2] = In32[i][3];
+        R01[i+FP_LIMBS][3] = In32[i+FP_LIMBS][3];
     }
 
     tp.x = R[1].x;
     tp.y = R[1].z;
     tp.z = R[2].x;
     tp.t = R[2].z;
-    theta_montback(&tp, &ExMod);
+    theta_montback(&tp, &mb);
     transpose(In32, tp);
-    for (i=0; i<9; i++){
+    for (i=0; i<FP_LIMBS; i++){
         R12[i][0] = In32[i][0];
-        R12[i][1] = In32[i+9][0];
+        R12[i][1] = In32[i+FP_LIMBS][0];
         R12[i][2] = In32[i][1];
-        R12[i][3] = In32[i+9][1];
+        R12[i][3] = In32[i+FP_LIMBS][1];
 
-        R12[i+9][0] = In32[i][2];
-        R12[i+9][1] = In32[i+9][2];
-        R12[i+9][2] = In32[i][3];
-        R12[i+9][3] = In32[i+9][3];
+        R12[i+FP_LIMBS][0] = In32[i][2];
+        R12[i+FP_LIMBS][1] = In32[i+FP_LIMBS][2];
+        R12[i+FP_LIMBS][2] = In32[i][3];
+        R12[i+FP_LIMBS][3] = In32[i+FP_LIMBS][3];
     }
 
-    for (int i=0; i<5; i++){
+    for (int i=0; i<NWORDS_FIELD; i++){
         tp.x.re[i] = curve->A24.x.re[i];
         tp.y.re[i] = curve->A24.x.im[i];
         tp.z.re[i] = curve->A24.z.re[i];
         tp.t.re[i] = curve->A24.z.im[i];
     }
-    theta_montback(&tp, &ExMod);
+    theta_montback(&tp, &mb);
     transpose(A24, tp);
     // Main loop
-    fp_t mb = {0, 0, 0, 0, 35184372088832};
     for (i = kbits - 1; i >= 0; i--) {
         h = r[2 * i] + r[2 * i + 1]; // in {0, 1, 2}
         maskk = 0 - (h & 1);
         fp2_select_vec(Arith1, R01, vdupq_n_u32(maskk));
 
         maskk = 0 - (h >> 1);
-        for (int z=0; z<9; z++){
-            Arith1[z+9] = R12[z+9];
+        for (int z=0; z<FP_LIMBS; z++){
+            Arith1[z+FP_LIMBS] = R12[z+FP_LIMBS];
         }
         fp2_select_vec(Arith1, Arith1, vdupq_n_u32(maskk));
 
@@ -998,35 +957,35 @@ int xDBLMUL_vec(ec_point_t *S,
         }
 
         maskk = 0 - r[2 * i + 1]; // in {0, 1}
-        fp2_select_vec(Arith1+9, R01, vdupq_n_u32(maskk));
+        fp2_select_vec(Arith1+FP_LIMBS, R01, vdupq_n_u32(maskk));
         fp2_select_vec(Arith2, R12, vdupq_n_u32(maskk));
 
         cswap_points_vec(DIFF1a32, DIFF1b32, maskk);
         
         //Before: Arith1 <- T0T1; Arith2 <- T2;
-        for (int z=0; z<9; z++){
+        for (int z=0; z<FP_LIMBS; z++){
             R12[z] = R01[z];
             //R0 update
             R01[z] = Arith1[z];
             Arith1[z] = Arith2[z];
         }
-        xADD2_vec(Arith1+9, Arith1, DIFF1a32, Arith2, R12, DIFF2a32);
+        xADD2_vec(Arith1+FP_LIMBS, Arith1, DIFF1a32, Arith2, R12, DIFF2a32);
 
         // If hw (mod 2) = 1 then swap DIFF2a and DIFF2b
         maskk = 0 - (h & 1);
         cswap_points_vec(DIFF2a32, DIFF2b32, maskk);
 
         // R <- T
-        for (int z=0; z<9; z++){
+        for (int z=0; z<FP_LIMBS; z++){
             //R1, R2 update
-            R01[z+9] =  R12[z] = Arith1[z+9];
-            R12[z+9] = Arith2[z];
+            R01[z+FP_LIMBS] =  R12[z] = Arith1[z+FP_LIMBS];
+            R12[z+FP_LIMBS] = Arith2[z];
         }
     }
 
     itranspose(&tp, R01);
-    theta_montback(&tp, &mb);
-    for (int z=0; z<5; z++){
+    theta_montback(&tp, &imb);
+    for (int z=0; z<NWORDS_FIELD; z++){
         R[0].x.re[z] = tp.x.re[z];
         R[0].x.im[z] = tp.y.re[z];
         R[0].z.re[z] = tp.z.re[z];
@@ -1039,8 +998,8 @@ int xDBLMUL_vec(ec_point_t *S,
     }
 
     itranspose(&tp, R12);
-    theta_montback(&tp, &mb);
-    for (int z=0; z<5; z++){
+    theta_montback(&tp, &imb);
+    for (int z=0; z<NWORDS_FIELD; z++){
         R[2].x.re[z] = tp.x.im[z];
         R[2].x.im[z] = tp.y.im[z];
         R[2].z.re[z] = tp.z.im[z];

@@ -33,7 +33,7 @@ elseif (${SQISIGN_BUILD_TYPE} MATCHES "arm64crypto")
 endif()
 
 #SVARIANT_S = lvl1
-SET(SVARIANT_S "lvl1")
+SET(SVARIANT_S "lvl1;lvl3;lvl5")
 
 include(.cmake/flags.cmake)
 include(.cmake/sanitizers.cmake)

@@ -3,7 +3,6 @@
 #include <mp.h>
 #include <ec.h>
 #include <hd.h>
-#include <arm_neon.h>
 
 void
 ec_point_init(ec_point_t *P)
@@ -40,42 +39,6 @@ cswap_points(ec_point_t *P, ec_point_t *Q, const digit_t option)
   // If option = 0 then P <- P and Q <- Q, else if option = 0xFF...FF then P <- Q and Q <- P
     fp2_cswap(&(P->x), &(Q->x), option);
     fp2_cswap(&(P->z), &(Q->z), option);
-}
-
-void cswap_points_vec(uint32x4_t *P, uint32x4_t *Q, const uint32_t option)
-{ 
-  // four point [Px_re, Px_im, Pz_re, Pz_im] [Qx_re, Qx_im, Qz_re, Qz_im]
-  // Swap points in constant time
-  // If option = 0 then P <- P and Q <- Q, else if option = 0xFF...FF then P <- Q and Q <- P
-  uint32x4_t mask = vdupq_n_u32(option&1);
- 
-  uint32x4_t rr = vdupq_n_u32(0x1E61E19E);
-  uint32x4_t c0 = vaddq_u32(vsubq_u32(vdupq_n_u32(1), mask), rr);
-  uint32x4_t c1 = vaddq_u32(mask, rr);
-
-  uint32x4_t tmp1, tmp2, sum;
-  uint64x2_t tmp3, tmp4, tmp5, tmp6;
-  for (int i=0; i<9; i++) {
-    tmp1 = P[i];
-    tmp2 = Q[i];
-    sum = vaddq_u32(tmp1, tmp2);
-    tmp3 = vmull_u32(*(uint32x2_t*)(&sum) , *(uint32x2_t*)(&rr));
-    tmp4 = vmull_high_u32(sum , rr);
-
-    tmp5 = vaddq_u64(vmull_u32(*(uint32x2_t*)(&c0) , *(uint32x2_t*)(&tmp2)), vmull_u32(*(uint32x2_t*)(&c1) , *(uint32x2_t*)(&tmp1)));
-    tmp6 = vaddq_u64(vmull_high_u32(c0 , tmp2), vmull_high_u32(c1, tmp1));
-    tmp5 = vsubq_u64(tmp5, tmp3);
-    tmp6 = vsubq_u64(tmp6, tmp4);
-    uint32x4_t toQ = {tmp5[0], tmp5[1], tmp6[0], tmp6[1]};
-    Q[i] = toQ;
-
-    tmp5 = vaddq_u64(vmull_u32(*(uint32x2_t*)(&c0) , *(uint32x2_t*)(&tmp1)), vmull_u32(*(uint32x2_t*)(&c1) , *(uint32x2_t*)(&tmp2)));
-    tmp6 = vaddq_u64(vmull_high_u32(c0 , tmp1), vmull_high_u32(c1, tmp2));
-    tmp5 = vsubq_u64(tmp5, tmp3);
-    tmp6 = vsubq_u64(tmp6, tmp4);
-    uint32x4_t toP = {tmp5[0], tmp5[1], tmp6[0], tmp6[1]};
-    P[i] = toP;
-  }
 }
 
 void
@@ -268,63 +231,6 @@ xDBL_E0(ec_point_t *Q, const ec_point_t *P)
     fp2_mul(&Q->z, &Q->z, &t2);
 }
 
-void xDBL_E0_vec(uint32x4_t *Q, const uint32x4_t *P)
-{ 
-   // Doubling of a Montgomery point in projective coordinates (X:Z) on the curve E0 with (A:C) = (0:1).
-  // Input: projective Montgomery x-coordinates P = (XP:ZP), where xP=XP/ZP, and Montgomery curve constants (A:C) = (0:1). 
-  // Output: projective Montgomery x-coordinates Q <- 2*P = (XQ:ZQ) such that x(2P)=XQ/ZQ.
-    uint32x4_t In1[18], In2[18], a[18], b[18];
-    for (int i=0; i<9; i++){
-        In1[i][0]   = P[i][0];
-        In1[i+9][0] = P[i][1];
-        In2[i][0]   = P[i][2];
-        In2[i+9][0] = P[i][3];
-    }
-
-    fp2_add_batched(a, In1, In2);
-    prop_2(a);
-    prop_2(a+9);
-    a[0] = vaddq_u32(a[0], div5(a+8));
-    a[9] = vaddq_u32(a[9], div5(a+17));
-
-    fp2_sub_batched(b, In1, In2);
-    prop_2(b);
-    prop_2(b+9);
-    b[0] = vaddq_u32(b[0], div5(b+8));
-    b[9] = vaddq_u32(b[9], div5(b+17));
-
-    for (int i=0; i<18; i++){
-        a[i][1] = b[i][0];
-    }
-    fp2_sqr_batched(a, a);
-    
-    for (int i=0; i<18; i++){
-        b[i][0] = a[i][1];
-    }
-    fp2_sub_batched(In1, a, b);
-
-    for (int i=0; i<18; i++){
-        b[i][1] = a[i][1];
-        In1[i][1] = a[i][0];
-    }
-    fp2_add_batched(In2, a, b);
-    prop_2(In2);
-    prop_2(In2+9);
-    In2[0] = vaddq_u32(In2[0], div5(In2+8));
-    In2[9] = vaddq_u32(In2[9], div5(In2+17));
-
-
-    fp2_mul_batched(a, In2, In1);
-
-    for (int i=0; i<9; i++){
-        Q[i][2] = a[i][0];
-        Q[i][3] = a[i+9][0];
-        Q[i][0] = a[i][1];
-        Q[i][1] = a[i+9][1];
-    }
-}
-
-
 void
 xDBL(ec_point_t *Q, const ec_point_t *P, const ec_point_t *AC)
 { // Doubling of a Montgomery point in projective coordinates (X:Z). Computation of coefficient values A+2C and 4C
@@ -337,13 +243,9 @@ xDBL(ec_point_t *Q, const ec_point_t *P, const ec_point_t *AC)
     fp2_sqr(&t0, &t0);
     fp2_sub(&t1, &P->x, &P->z);
     fp2_sqr(&t1, &t1);
-
     fp2_sub(&t2, &t0, &t1);
-    
     fp2_add(&t3, &AC->z, &AC->z);
-    
     fp2_mul(&t1, &t1, &t3);
-    
     fp2_add(&t1, &t1, &t1);
     fp2_mul(&Q->x, &t0, &t1);
     fp2_add(&t0, &t3, &AC->x);
@@ -373,76 +275,6 @@ xDBL_A24(ec_point_t *Q, const ec_point_t *P, const ec_point_t *A24, const bool A
     fp2_mul(&Q->z, &t0, &t2);
 }
 
-void xDBL_A24_vec(uint32x4_t *Q, const uint32x4_t *P, const uint32x4_t *A24, const bool A24_normalized)
-{ // Doubling of a Montgomery point in projective coordinates (X:Z).
-  // Input: projective Montgomery x-coordinates P = (XP:ZP), where xP=XP/ZP, and
-  //        the Montgomery curve constants A24 = (A+2C:4C) (or A24 = (A+2C/4C:1) if normalized).
-  // Output: projective Montgomery x-coordinates Q <- 2*P = (XQ:ZQ) such that x(2P)=XQ/ZQ.
-    uint32x4_t In1[18], In2[18], a[18], b[18];
-    for (int i=0; i<9; i++){
-        In1[i][0]   = P[i][0];
-        In1[i+9][0] = P[i][1];
-        In2[i][0]   = P[i][2];
-        In2[i+9][0] = P[i][3];
-    }
-
-    fp2_add_batched(a, In1, In2);
-
-    fp2_sub_batched(b, In1, In2);
-    prop_2(b);
-    prop_2(b+9);
-    b[0] = vaddq_u32(b[0], div5(b+8));
-    b[9] = vaddq_u32(b[9], div5(b+17));
-    
-    for (int i=0; i<18; i++){
-        a[i][1] = b[i][0];
-    }
-    fp2_sqr_batched(a, a);
-
-    for (int i=0; i<18; i++){
-        b[i][0] = a[i][1];
-    }
-    fp2_sub_batched(In1, a, b);
-    prop_2(In1);
-    prop_2(In1+9);
-    In1[0] = vaddq_u32(In1[0], div5(In1+8));
-    In1[9] = vaddq_u32(In1[9], div5(In1+17));
-    
-    if (!A24_normalized) {
-        for (int i=0; i<9; i++){
-            In2[i][0]   = A24[i][2];
-            In2[i+9][0] = A24[i][3];
-        }
-        fp2_mul_batched(b, b, In2);
-    }
-
-    for (int i=0; i<9; i++){
-        a[i][1]   = In1[i][0];
-        a[i+9][1] = In1[i+9][0];
-
-        b[i][1]   = A24[i][0];
-        b[i+9][1] = A24[i][1];
-    }
-    fp2_mul_batched(a, a, b);
-    for (int i=0; i<9; i++){
-        Q[i][0] = a[i][0];
-        Q[i][1] = a[i+9][0];
-
-        a[i][0] = a[i][1];
-        a[i+9][0] = a[i+9][1];
-    }
-
-    fp2_add_batched(a, a, b);
-
-    fp2_mul_batched(In2, a, In1);
-    for (int i=0; i<9; i++){
-        Q[i][2] = In2[i][0];
-        Q[i][3] = In2[i+9][0];
-    }
-}
-
-
-
 void
 xADD(ec_point_t *R, const ec_point_t *P, const ec_point_t *Q, const ec_point_t *PQ)
 { // Differential addition of Montgomery points in projective coordinates (X:Z).
@@ -465,189 +297,6 @@ xADD(ec_point_t *R, const ec_point_t *P, const ec_point_t *Q, const ec_point_t *
     fp2_mul(&R->z, &PQ->x, &t3);
     fp2_copy(&R->x, &t2);
 }
-
-void xADD2_ec_vec(
-    ec_point_t *R1, const ec_point_t *P1, const ec_point_t *Q1, const ec_point_t *PQ1,
-    ec_point_t *R2, const ec_point_t *P2, const ec_point_t *Q2, const ec_point_t *PQ2
-    )
-{ 
-  // DO two set xADD
-  // Differential addition of Montgomery points in projective coordinates (X:Z).
-  // Input: projective Montgomery points P=(XP:ZP) and Q=(XQ:ZQ) such that xP=XP/ZP and xQ=XQ/ZQ, and difference
-  //        PQ=P-Q=(XPQ:ZPQ).
-  // Output: projective Montgomery point R <- P+Q = (XR:ZR) such that x(P+Q)=XR/ZR.
-    theta_point_t tp;
-    tp.x = P1->x;
-    tp.y = Q1->x;
-    tp.z = P2->x;
-    tp.t = Q2->x;
-    uint32x4_t In1[18], In2[18];
-    transpose(In1, tp);
-    tp.x = P1->z;
-    tp.y = Q1->z;
-    tp.z = P2->z;
-    tp.t = Q2->z;
-    transpose(In2, tp);
-
-    uint32x4_t a[18], b[18];
-    fp2_add_batched(a, In1, In2);
-
-    fp2_sub_batched(b, In1, In2);
-    prop_2(b);
-    prop_2(b+9);
-    b[0] = vaddq_u32(b[0], div5(b+8));
-    b[9] = vaddq_u32(b[9], div5(b+17));
-
-    for (int i=0; i<18; i++){
-        In1[i][0] = a[i][0];
-        In1[i][1] = b[i][0];
-        In1[i][2] = a[i][2];
-        In1[i][3] = b[i][2];
-
-        In2[i][0] = b[i][1];
-        In2[i][1] = a[i][1];
-        In2[i][2] = b[i][3];
-        In2[i][3] = a[i][3];
-    }
-    fp2_mul_batched(a, In1, In2); //r
-    
-    for (int i=0; i<18; i++){
-        In1[i][0] = a[i][0];
-        In1[i][1] = a[i][2];
-
-        In2[i][0] = a[i][1];
-        In2[i][1] = a[i][3];
-    }
-    fp2_add_batched(a, In1, In2);
-    fp2_sub_batched(b, In1, In2);
-    prop_2(b);
-    prop_2(b+9);
-    b[0] = vaddq_u32(b[0], div5(b+8));
-    b[9] = vaddq_u32(b[9], div5(b+17));
-
-    for (int i=0; i<18; i++){
-        In1[i][0] = a[i][0];
-        In1[i][1] = b[i][0];
-        In1[i][2] = a[i][1];
-        In1[i][3] = b[i][1];
-    }
-    fp2_sqr_batched(In1, In1); //3r
-
-    tp.x = PQ1->z;
-    tp.y = PQ1->x;
-    tp.z = PQ2->z;
-    tp.t = PQ2->x;
-    transpose(In2, tp);
-    fp2_mul_batched(a, In1, In2);
-    itranspose(&tp, a);
-    fp_t mb = {429496729, 0, 0, 0, 52776558133248};
-    theta_montback(&tp, &mb);
-    R1->x = tp.x;
-    R1->z = tp.y;
-    R2->x = tp.z;
-    R2->z = tp.t;
-}
-
-void xADD2_vec(
-    uint32x4_t *R1, const uint32x4_t *P1, const uint32x4_t *PQ1,
-    uint32x4_t *R2, const uint32x4_t *P2, const uint32x4_t *PQ2
-    )
-{ 
-  // DO two set xADD
-  // Differential addition of Montgomery points in projective coordinates (X:Z).
-  // Input: projective Montgomery points P=(XP:ZP) and Q=(XQ:ZQ) such that xP=XP/ZP and xQ=XQ/ZQ, and difference
-  //        PQ=P-Q=(XPQ:ZPQ).
-  // Output: projective Montgomery point R <- P+Q = (XR:ZR) such that x(P+Q)=XR/ZR.
-
-    uint32x4_t In1[18], In2[18], a[18], b[18];;
-    for (int i=0; i<9; i++){
-        In1[i][0]   = P1[i][0];
-        In1[i+9][0] = P1[i][1];
-        In1[i][1]   = P1[i+9][0];
-        In1[i+9][1] = P1[i+9][1];
-        In1[i][2]   = P2[i][0];
-        In1[i+9][2] = P2[i][1];
-        In1[i][3]   = P2[i+9][0];
-        In1[i+9][3] = P2[i+9][1];
-
-        In2[i][0]   = P1[i][2];
-        In2[i+9][0] = P1[i][3];
-        In2[i][1]   = P1[i+9][2];
-        In2[i+9][1] = P1[i+9][3];
-        In2[i][2]   = P2[i][2];
-        In2[i+9][2] = P2[i][3];
-        In2[i][3]   = P2[i+9][2];
-        In2[i+9][3] = P2[i+9][3];
-    }
-    fp2_add_batched(a, In1, In2);
-
-    fp2_sub_batched(b, In1, In2);
-    prop_2(b);
-    prop_2(b+9);
-    b[0] = vaddq_u32(b[0], div5(b+8));
-    b[9] = vaddq_u32(b[9], div5(b+17));
-
-    for (int i=0; i<18; i++){
-        In1[i][0] = a[i][0];
-        In1[i][1] = b[i][0];
-        In1[i][2] = a[i][2];
-        In1[i][3] = b[i][2];
-
-        In2[i][0] = b[i][1];
-        In2[i][1] = a[i][1];
-        In2[i][2] = b[i][3];
-        In2[i][3] = a[i][3];
-    }
-    fp2_mul_batched(a, In1, In2);
-    
-    for (int i=0; i<18; i++){
-        In1[i][0] = a[i][0];
-        In1[i][1] = a[i][2];
-
-        In2[i][0] = a[i][1];
-        In2[i][1] = a[i][3];
-    }
-    fp2_add_batched(a, In1, In2);
-    fp2_sub_batched(b, In1, In2);
-    prop_2(b);
-    prop_2(b+9);
-    b[0] = vaddq_u32(b[0], div5(b+8));
-    b[9] = vaddq_u32(b[9], div5(b+17));
-
-    for (int i=0; i<18; i++){
-        In1[i][0] = a[i][0];
-        In1[i][1] = b[i][0];
-        In1[i][2] = a[i][1];
-        In1[i][3] = b[i][1];
-    }
-    fp2_sqr_batched(In1, In1);
-
-    for (int i=0; i<9; i++){
-        In2[i][0]   = PQ1[i][2];
-        In2[i+9][0] = PQ1[i][3];
-        In2[i][1]   = PQ1[i][0];
-        In2[i+9][1] = PQ1[i][1];
-        In2[i][2]   = PQ2[i][2];
-        In2[i+9][2] = PQ2[i][3];
-        In2[i][3]   = PQ2[i][0];
-        In2[i+9][3] = PQ2[i][1];
-    }
-    fp2_mul_batched(a, In1, In2);
-    
-    for (int i=0; i<9; i++){
-        R1[i][0] = a[i][0];
-        R1[i][1] = a[i+9][0];
-        R1[i][2] = a[i][1];
-        R1[i][3] = a[i+9][1];
-
-        R2[i][0] = a[i][2];
-        R2[i][1] = a[i+9][2];
-        R2[i][2] = a[i][3];
-        R2[i][3] = a[i+9][3];
-    }
-}
-
-
 
 void
 xDBLADD(ec_point_t *R,
@@ -846,9 +495,8 @@ xDBLMUL(ec_point_t *S,
         select_point(&T[2], &R[1], &R[2], maskk);
 
         cswap_points(&DIFF1a, &DIFF1b, maskk);
-        // xADD(&T[1], &T[1], &T[2], &DIFF1a);
-        // xADD(&T[2], &R[0], &R[2], &DIFF2a);
-        xADD2_ec_vec(&T[1], &T[1], &T[2], &DIFF1a, &T[2], &R[0], &R[2], &DIFF2a);
+        xADD(&T[1], &T[1], &T[2], &DIFF1a);
+        xADD(&T[2], &R[0], &R[2], &DIFF2a);
 
         // If hw (mod 2) = 1 then swap DIFF2a and DIFF2b
         maskk = 0 - (h & 1);
@@ -1017,6 +665,322 @@ ec_biscalar_mul(ec_point_t *res,
     }
 }
 
+//vectorization
+void cswap_points_vec(uint32x4_t *P, uint32x4_t *Q, const uint32_t option)
+{ 
+  // four point [Px_re, Px_im, Pz_re, Pz_im] [Qx_re, Qx_im, Qz_re, Qz_im]
+  // Swap points in constant time
+  // If option = 0 then P <- P and Q <- Q, else if option = 0xFF...FF then P <- Q and Q <- P
+  uint32x4_t mask = vdupq_n_u32(option&1);
+ 
+  uint32x4_t rr = vdupq_n_u32(0x1E61E19E);
+  uint32x4_t c0 = vaddq_u32(vsubq_u32(vdupq_n_u32(1), mask), rr);
+  uint32x4_t c1 = vaddq_u32(mask, rr);
+
+  uint32x4_t tmp1, tmp2, sum;
+  uint64x2_t tmp3, tmp4, tmp5, tmp6;
+  for (int i=0; i<FP_LIMBS; i++) {
+    tmp1 = P[i];
+    tmp2 = Q[i];
+    sum = vaddq_u32(tmp1, tmp2);
+    tmp3 = vmull_u32(*(uint32x2_t*)(&sum) , *(uint32x2_t*)(&rr));
+    tmp4 = vmull_high_u32(sum , rr);
+
+    tmp5 = vaddq_u64(vmull_u32(*(uint32x2_t*)(&c0) , *(uint32x2_t*)(&tmp2)), vmull_u32(*(uint32x2_t*)(&c1) , *(uint32x2_t*)(&tmp1)));
+    tmp6 = vaddq_u64(vmull_high_u32(c0 , tmp2), vmull_high_u32(c1, tmp1));
+    tmp5 = vsubq_u64(tmp5, tmp3);
+    tmp6 = vsubq_u64(tmp6, tmp4);
+    uint32x4_t toQ = {tmp5[0], tmp5[1], tmp6[0], tmp6[1]};
+    Q[i] = toQ;
+
+    tmp5 = vaddq_u64(vmull_u32(*(uint32x2_t*)(&c0) , *(uint32x2_t*)(&tmp1)), vmull_u32(*(uint32x2_t*)(&c1) , *(uint32x2_t*)(&tmp2)));
+    tmp6 = vaddq_u64(vmull_high_u32(c0 , tmp1), vmull_high_u32(c1, tmp2));
+    tmp5 = vsubq_u64(tmp5, tmp3);
+    tmp6 = vsubq_u64(tmp6, tmp4);
+    uint32x4_t toP = {tmp5[0], tmp5[1], tmp6[0], tmp6[1]};
+    P[i] = toP;
+  }
+}
+
+void xDBL_E0_vec(uint32x4_t *Q, const uint32x4_t *P)
+{ 
+   // Doubling of a Montgomery point in projective coordinates (X:Z) on the curve E0 with (A:C) = (0:1).
+  // Input: projective Montgomery x-coordinates P = (XP:ZP), where xP=XP/ZP, and Montgomery curve constants (A:C) = (0:1). 
+  // Output: projective Montgomery x-coordinates Q <- 2*P = (XQ:ZQ) such that x(2P)=XQ/ZQ.
+    uint32x4_t In1[FP2_LIMBS], In2[FP2_LIMBS], a[FP2_LIMBS], b[FP2_LIMBS];
+    for (int i=0; i<FP_LIMBS; i++){
+        In1[i][0]   = P[i][0];
+        In1[i+FP_LIMBS][0] = P[i][1];
+        In2[i][0]   = P[i][2];
+        In2[i+FP_LIMBS][0] = P[i][3];
+    }
+
+    fp2_add_batched(a, In1, In2);
+    fp2_bactched_reduction(a);
+
+    fp2_sub_batched(b, In1, In2);
+    fp2_bactched_reduction(b);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        a[i][1] = b[i][0];
+    }
+    fp2_sqr_batched(a, a);
+    
+    for (int i=0; i<FP2_LIMBS; i++){
+        b[i][0] = a[i][1];
+    }
+    fp2_sub_batched(In1, a, b);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        b[i][1] = a[i][1];
+        In1[i][1] = a[i][0];
+    }
+    fp2_add_batched(In2, a, b);
+    fp2_bactched_reduction(In2);
+
+
+    fp2_mul_batched(a, In2, In1);
+
+    for (int i=0; i<FP_LIMBS; i++){
+        Q[i][2] = a[i][0];
+        Q[i][3] = a[i+FP_LIMBS][0];
+        Q[i][0] = a[i][1];
+        Q[i][1] = a[i+FP_LIMBS][1];
+    }
+}
+
+void xDBL_A24_vec(uint32x4_t *Q, const uint32x4_t *P, const uint32x4_t *A24, const bool A24_normalized)
+{ // Doubling of a Montgomery point in projective coordinates (X:Z).
+  // Input: projective Montgomery x-coordinates P = (XP:ZP), where xP=XP/ZP, and
+  //        the Montgomery curve constants A24 = (A+2C:4C) (or A24 = (A+2C/4C:1) if normalized).
+  // Output: projective Montgomery x-coordinates Q <- 2*P = (XQ:ZQ) such that x(2P)=XQ/ZQ.
+    uint32x4_t In1[FP2_LIMBS], In2[FP2_LIMBS], a[FP2_LIMBS], b[FP2_LIMBS];
+    for (int i=0; i<FP_LIMBS; i++){
+        In1[i][0]           = P[i][0];
+        In1[i+FP_LIMBS][0]  = P[i][1];
+        In2[i][0]           = P[i][2];
+        In2[i+FP_LIMBS][0]  = P[i][3];
+    }
+
+    fp2_add_batched(a, In1, In2);
+
+    fp2_sub_batched(b, In1, In2);
+    fp2_bactched_reduction(b);
+    
+    for (int i=0; i<FP2_LIMBS; i++){
+        a[i][1] = b[i][0];
+    }
+    fp2_sqr_batched(a, a);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        b[i][0] = a[i][1];
+    }
+    fp2_sub_batched(In1, a, b);
+    fp2_bactched_reduction(In1);
+    
+    if (!A24_normalized) {
+        for (int i=0; i<FP_LIMBS; i++){
+            In2[i][0]   = A24[i][2];
+            In2[i+FP_LIMBS][0] = A24[i][3];
+        }
+        fp2_mul_batched(b, b, In2);
+    }
+
+    for (int i=0; i<FP_LIMBS; i++){
+        a[i][1]          = In1[i][0];
+        a[i+FP_LIMBS][1] = In1[i+FP_LIMBS][0];
+
+        b[i][1]          = A24[i][0];
+        b[i+FP_LIMBS][1] = A24[i][1];
+    }
+    fp2_mul_batched(a, a, b);
+    for (int i=0; i<FP_LIMBS; i++){
+        Q[i][0] = a[i][0];
+        Q[i][1] = a[i+FP_LIMBS][0];
+
+        a[i][0]          = a[i][1];
+        a[i+FP_LIMBS][0] = a[i+FP_LIMBS][1];
+    }
+
+    fp2_add_batched(a, a, b);
+
+    fp2_mul_batched(In2, a, In1);
+    for (int i=0; i<FP_LIMBS; i++){
+        Q[i][2] = In2[i][0];
+        Q[i][3] = In2[i+FP_LIMBS][0];
+    }
+}
+
+void xADD2_ec_vec(
+    ec_point_t *R1, const ec_point_t *P1, const ec_point_t *Q1, const ec_point_t *PQ1,
+    ec_point_t *R2, const ec_point_t *P2, const ec_point_t *Q2, const ec_point_t *PQ2
+    )
+{ 
+  // DO two set xADD
+  // Differential addition of Montgomery points in projective coordinates (X:Z).
+  // Input: projective Montgomery points P=(XP:ZP) and Q=(XQ:ZQ) such that xP=XP/ZP and xQ=XQ/ZQ, and difference
+  //        PQ=P-Q=(XPQ:ZPQ).
+  // Output: projective Montgomery point R <- P+Q = (XR:ZR) such that x(P+Q)=XR/ZR.
+    theta_point_t tp;
+    tp.x = P1->x;
+    tp.y = Q1->x;
+    tp.z = P2->x;
+    tp.t = Q2->x;
+    uint32x4_t In1[FP2_LIMBS], In2[FP2_LIMBS];
+    transpose(In1, tp);
+    tp.x = P1->z;
+    tp.y = Q1->z;
+    tp.z = P2->z;
+    tp.t = Q2->z;
+    transpose(In2, tp);
+
+    uint32x4_t a[FP2_LIMBS], b[FP2_LIMBS];
+    fp2_add_batched(a, In1, In2);
+
+    fp2_sub_batched(b, In1, In2);
+    fp2_bactched_reduction(b);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        In1[i][0] = a[i][0];
+        In1[i][1] = b[i][0];
+        In1[i][2] = a[i][2];
+        In1[i][3] = b[i][2];
+
+        In2[i][0] = b[i][1];
+        In2[i][1] = a[i][1];
+        In2[i][2] = b[i][3];
+        In2[i][3] = a[i][3];
+    }
+    fp2_mul_batched(a, In1, In2); //r
+    
+    for (int i=0; i<FP2_LIMBS; i++){
+        In1[i][0] = a[i][0];
+        In1[i][1] = a[i][2];
+
+        In2[i][0] = a[i][1];
+        In2[i][1] = a[i][3];
+    }
+    fp2_add_batched(a, In1, In2);
+    fp2_sub_batched(b, In1, In2);
+    fp2_bactched_reduction(b);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        In1[i][0] = a[i][0];
+        In1[i][1] = b[i][0];
+        In1[i][2] = a[i][1];
+        In1[i][3] = b[i][1];
+    }
+    fp2_sqr_batched(In1, In1); //3r
+
+    tp.x = PQ1->z;
+    tp.y = PQ1->x;
+    tp.z = PQ2->z;
+    tp.t = PQ2->x;
+    transpose(In2, tp);
+    fp2_mul_batched(a, In1, In2);
+    itranspose(&tp, a);
+    fp_t mb;
+    ec_montback_array(&mb);
+    theta_montback(&tp, &mb);
+    R1->x = tp.x;
+    R1->z = tp.y;
+    R2->x = tp.z;
+    R2->z = tp.t;
+}
+
+void xADD2_vec(
+    uint32x4_t *R1, const uint32x4_t *P1, const uint32x4_t *PQ1,
+    uint32x4_t *R2, const uint32x4_t *P2, const uint32x4_t *PQ2
+    )
+{ 
+  // DO two set xADD
+  // Differential addition of Montgomery points in projective coordinates (X:Z).
+  // Input: projective Montgomery points P=(XP:ZP) and Q=(XQ:ZQ) such that xP=XP/ZP and xQ=XQ/ZQ, and difference
+  //        PQ=P-Q=(XPQ:ZPQ).
+  // Output: projective Montgomery point R <- P+Q = (XR:ZR) such that x(P+Q)=XR/ZR.
+
+    uint32x4_t In1[FP2_LIMBS], In2[FP2_LIMBS], a[FP2_LIMBS], b[FP2_LIMBS];;
+    for (int i=0; i<FP_LIMBS; i++){
+        In1[i][0]          = P1[i][0];
+        In1[i+FP_LIMBS][0] = P1[i][1];
+        In1[i][1]          = P1[i+FP_LIMBS][0];
+        In1[i+FP_LIMBS][1] = P1[i+FP_LIMBS][1];
+        In1[i][2]          = P2[i][0];
+        In1[i+FP_LIMBS][2] = P2[i][1];
+        In1[i][3]          = P2[i+FP_LIMBS][0];
+        In1[i+FP_LIMBS][3] = P2[i+FP_LIMBS][1];
+
+        In2[i][0]          = P1[i][2];
+        In2[i+FP_LIMBS][0] = P1[i][3];
+        In2[i][1]          = P1[i+FP_LIMBS][2];
+        In2[i+FP_LIMBS][1] = P1[i+FP_LIMBS][3];
+        In2[i][2]          = P2[i][2];
+        In2[i+FP_LIMBS][2] = P2[i][3];
+        In2[i][3]          = P2[i+FP_LIMBS][2];
+        In2[i+FP_LIMBS][3] = P2[i+FP_LIMBS][3];
+    }
+    fp2_add_batched(a, In1, In2);
+
+    fp2_sub_batched(b, In1, In2);
+    fp2_bactched_reduction(b);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        In1[i][0] = a[i][0];
+        In1[i][1] = b[i][0];
+        In1[i][2] = a[i][2];
+        In1[i][3] = b[i][2];
+
+        In2[i][0] = b[i][1];
+        In2[i][1] = a[i][1];
+        In2[i][2] = b[i][3];
+        In2[i][3] = a[i][3];
+    }
+    fp2_mul_batched(a, In1, In2);
+    
+    for (int i=0; i<FP2_LIMBS; i++){
+        In1[i][0] = a[i][0];
+        In1[i][1] = a[i][2];
+
+        In2[i][0] = a[i][1];
+        In2[i][1] = a[i][3];
+    }
+    fp2_add_batched(a, In1, In2);
+    fp2_sub_batched(b, In1, In2);
+    fp2_bactched_reduction(b);
+
+    for (int i=0; i<FP2_LIMBS; i++){
+        In1[i][0] = a[i][0];
+        In1[i][1] = b[i][0];
+        In1[i][2] = a[i][1];
+        In1[i][3] = b[i][1];
+    }
+    fp2_sqr_batched(In1, In1);
+
+    for (int i=0; i<FP_LIMBS; i++){
+        In2[i][0]   = PQ1[i][2];
+        In2[i+FP_LIMBS][0] = PQ1[i][3];
+        In2[i][1]   = PQ1[i][0];
+        In2[i+FP_LIMBS][1] = PQ1[i][1];
+        In2[i][2]   = PQ2[i][2];
+        In2[i+FP_LIMBS][2] = PQ2[i][3];
+        In2[i][3]   = PQ2[i][0];
+        In2[i+FP_LIMBS][3] = PQ2[i][1];
+    }
+    fp2_mul_batched(a, In1, In2);
+    
+    for (int i=0; i<FP_LIMBS; i++){
+        R1[i][0] = a[i][0];
+        R1[i][1] = a[i+FP_LIMBS][0];
+        R1[i][2] = a[i][1];
+        R1[i][3] = a[i+FP_LIMBS][1];
+
+        R2[i][0] = a[i][2];
+        R2[i][1] = a[i+FP_LIMBS][2];
+        R2[i][2] = a[i][3];
+        R2[i][3] = a[i+FP_LIMBS][3];
+    }
+}
+
 int
 ec_biscalar_mul_vec(ec_point_t *res,
                 const digit_t *scalarP,
@@ -1057,6 +1021,7 @@ ec_biscalar_mul_vec(ec_point_t *res,
         if (!fp2_is_zero(&curve->A)) { // If A is not zero normalize
             ec_curve_normalize_A24(&E);
         }
+
         return xDBLMUL_vec(res, &PQ->P, scalarP, &PQ->Q, scalarQ, &PQ->PmQ, kbits, (const ec_curve_t *)&E);
     }
 }

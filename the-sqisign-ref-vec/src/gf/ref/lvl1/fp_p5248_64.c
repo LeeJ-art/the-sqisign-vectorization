@@ -792,3 +792,324 @@ fp_decode_reduce(fp_t *d, const void *src, size_t len)
         fp_add(d, d, &a);
     }
 }
+
+//Vectorization
+void prop_2(uint32x4_t *n) {
+  __prop32(n);
+}
+
+// in: a, out: a/5
+void divn(uint32x4_t* least, uint32x4_t* in){
+  __div5(least, in);
+}
+
+void fp_bactched_reduction(uint32x4_t *out){
+    uint32x4_t tmp;
+    prop_2(out);
+    divn(&tmp, out+(FP_LIMBS-1));
+    out[0] = vaddq_u32(out[0], tmp);
+}
+
+void fp_add_batched(uint32x4_t* out, uint32x4_t *a, uint32x4_t *b){
+    for (int i=0; i<FP_LIMBS; i++){
+        out[i] = vaddq_u32(a[i], b[i]);
+    }
+}
+
+void fp_sub_batched(uint32x4_t* out, uint32x4_t *a, uint32x4_t *b){
+  __subvec(out, a, b);
+}
+
+void fp_mul_batched(uint32x2_t *out, uint32x4_t *a, uint32x4_t *b){
+    __fp_mul_asm(out, a, b);
+}
+
+void fp_sqr_batched(uint32x2_t *out, uint32x4_t *a){
+  __sqrvec(out, a);
+}
+
+void fp_sqrt_batched(uint32x4_t *out, const uint32x4_t *in) {
+    uint32x4_t x[FP_LIMBS];
+    for (int i=0; i<FP_LIMBS; i++){
+      x[i] = in[i];
+    }
+    fp_sqr_batched((uint32x2_t*)out, x);
+    for (int i=0; i<245; i++){
+      fp_sqr_batched((uint32x2_t*)out, out);
+    }
+
+    fp_sqr_batched((uint32x2_t*)x, out);
+    fp_sqr_batched((uint32x2_t*)x, x);
+
+    fp_mul_batched((uint32x2_t*)out, out, x);
+}
+
+void fp_exp3div4_vec(uint32x4_t *out, const uint32x4_t *in) {
+    uint32x4_t x[FP_LIMBS], t0[FP_LIMBS], t1[FP_LIMBS], t2[FP_LIMBS], t3[FP_LIMBS], t4[FP_LIMBS];
+    for (int i=0; i<FP_LIMBS; i++){
+      x[i] = in[i];
+    }
+    fp_sqr_batched((uint32x2_t *)out, x);      //out = in^2
+    fp_mul_batched((uint32x2_t *)t0, x, out);  //t0  = in^3
+    fp_sqr_batched((uint32x2_t *)out, t0);     //out = in^6
+    fp_mul_batched((uint32x2_t *)out, x, out); //out = in^7
+    fp_sqr_batched((uint32x2_t *)t1, out);     //t1  = in^14
+    fp_sqr_batched((uint32x2_t *)t3, t1);      //t3  = in^28
+    fp_sqr_batched((uint32x2_t *)t2, t3);      //t2  = in^56
+    memmove(t4, t2, sizeof(uint32x4_t)*9);     //t4  = in^56
+    for (int i=0; i<3; i++){
+        fp_sqr_batched((uint32x2_t *)t4, t4);  //t4  = in^448
+    }
+    fp_mul_batched((uint32x2_t *)t2, t2, t4);  //t2  = in^504
+    memmove(t4, t2, sizeof(uint32x4_t)*9);     //t4  = in^504
+    for (int i=0; i<6; i++){
+        fp_sqr_batched((uint32x2_t *)t4, t4);  //t4  = in^32256
+    }
+    fp_mul_batched((uint32x2_t *)t2, t2, t4);  //t2  = in^32760
+    memmove(t4, t2, sizeof(uint32x4_t)*9);     //t4  = in^32760
+    for (int i=0; i<2; i++){
+        fp_sqr_batched((uint32x2_t *)t4, t4);  //t4  = in^131040
+    }
+    fp_mul_batched((uint32x2_t *)t3, t3, t4);  //t3  = in^131068
+    for (int i=0; i<13; i++){
+        fp_sqr_batched((uint32x2_t *)t3, t3);  //t3  = in^1073709056
+    }
+    fp_mul_batched((uint32x2_t *)t2, t2, t3);  //t2  = in^1073741816
+    memmove(t3, t2, sizeof(uint32x4_t)*9);     //t3  = in^1073741816
+    for (int i=0; i<27; i++){
+        fp_sqr_batched((uint32x2_t *)t3, t3);  //t3  = in^144115187002114048
+    }
+    fp_mul_batched((uint32x2_t *)t2, t2, t3);  //t2  = in^144115188075855864
+    fp_mul_batched((uint32x2_t *)out, out, t2);//out = in^144115188075855871
+    memmove(t2, out, sizeof(uint32x4_t)*9);    //t2 = in^144115188075855871
+    for (int i=0; i<4; i++){
+        fp_sqr_batched((uint32x2_t *)t2, t2);  //t2  = in^2305843009213693936
+    }
+    fp_mul_batched((uint32x2_t *)t1, t1, t2);  //t1  = in^2305843009213693950
+    fp_mul_batched((uint32x2_t *)t0, t0, t1);  //t0  = in^2305843009213693953
+    fp_mul_batched((uint32x2_t *)t1, t0, t1);  //t1  = in^4611686018427387903
+    fp_mul_batched((uint32x2_t *)t0, t0, t1);  //t0  = in^6917529027641081856
+    fp_mul_batched((uint32x2_t *)t2, t0, t1);  //t2  = in^11529215046068469759
+    fp_mul_batched((uint32x2_t *)t0, t0, t2);  //t0  = in^18446744073709551615
+    fp_mul_batched((uint32x2_t *)t1, t0, t1);  //t1  = in^23058430092136939518
+    for (int i=0; i<63; i++){
+        fp_sqr_batched((uint32x2_t *)t1, t1);  //t1  = in^212676479325586539646162385571145580544 
+    }
+    fp_mul_batched((uint32x2_t *)t1, t0, t1);  //t1  = in^212676479325586539664609129644855132159
+    for (int i=0; i<64; i++){
+        fp_sqr_batched((uint32x2_t *)t1, t1);  //t1  = in^3923188584616675477397368389504791510045525408716312018944 
+    }
+    fp_mul_batched((uint32x2_t *)t0, t0, t1);  //t0  = in^3923188584616675477397368389504791510063972152790021570559
+    for (int i=0; i<57; i++){
+        fp_sqr_batched((uint32x2_t *)t0, t0);  //t0  = in^565391060729082985466655200237733925064794847000198066598769869225562472448
+    }
+    fp_mul_batched((uint32x2_t *)out, out, t0);//out = in^565391060729082985466655200237733925064794847000198066598913984413638328319
+}
+
+void fp_neg_vec(uint32x4_t *out, const uint32x4_t *in){
+    uint32x4_t x[FP_LIMBS], q[FP_LIMBS];
+    memmove(x, in, sizeof(uint32x4_t)*FP_LIMBS);
+    for(int i = 0;i<(FP_LIMBS-1);i++) q[i] = vdupq_n_u32(Q2_VALUE);
+    q[FP_LIMBS-1] = vdupq_n_u32(Q2_VALUE_SIGNIFICANT);
+    
+    for (int i=0; i<FP_LIMBS; i++){
+        out[i] = vsubq_u32(q[i], x[i]);
+    }
+    fp_bactched_reduction(out);
+}
+
+void modmul32(const uint32_t *a, const uint32_t *b, uint32_t *c) {
+  uint64_t t = 0;
+  uint32_t p8 = 0x50000u;
+  uint32_t q = ((uint32_t)1 << 29u); // q is unsaturated radix
+  uint32_t mask = (uint32_t)(q - (uint32_t)1);
+  t += (uint64_t)a[0] * b[0];
+  uint32_t v0 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[1];
+  t += (uint64_t)a[1] * b[0];
+  uint32_t v1 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[2];
+  t += (uint64_t)a[1] * b[1];
+  t += (uint64_t)a[2] * b[0];
+  uint32_t v2 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[3];
+  t += (uint64_t)a[1] * b[2];
+  t += (uint64_t)a[2] * b[1];
+  t += (uint64_t)a[3] * b[0];
+  uint32_t v3 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[4];
+  t += (uint64_t)a[1] * b[3];
+  t += (uint64_t)a[2] * b[2];
+  t += (uint64_t)a[3] * b[1];
+  t += (uint64_t)a[4] * b[0];
+  uint32_t v4 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[5];
+  t += (uint64_t)a[1] * b[4];
+  t += (uint64_t)a[2] * b[3];
+  t += (uint64_t)a[3] * b[2];
+  t += (uint64_t)a[4] * b[1];
+  t += (uint64_t)a[5] * b[0];
+  uint32_t v5 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[6];
+  t += (uint64_t)a[1] * b[5];
+  t += (uint64_t)a[2] * b[4];
+  t += (uint64_t)a[3] * b[3];
+  t += (uint64_t)a[4] * b[2];
+  t += (uint64_t)a[5] * b[1];
+  t += (uint64_t)a[6] * b[0];
+  uint32_t v6 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[7];
+  t += (uint64_t)a[1] * b[6];
+  t += (uint64_t)a[2] * b[5];
+  t += (uint64_t)a[3] * b[4];
+  t += (uint64_t)a[4] * b[3];
+  t += (uint64_t)a[5] * b[2];
+  t += (uint64_t)a[6] * b[1];
+  t += (uint64_t)a[7] * b[0];
+  uint32_t v7 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[0] * b[8];
+  t += (uint64_t)a[1] * b[7];
+  t += (uint64_t)a[2] * b[6];
+  t += (uint64_t)a[3] * b[5];
+  t += (uint64_t)a[4] * b[4];
+  t += (uint64_t)a[5] * b[3];
+  t += (uint64_t)a[6] * b[2];
+  t += (uint64_t)a[7] * b[1];
+  t += (uint64_t)a[8] * b[0];
+  t += (uint64_t)v0 * (uint64_t)p8;
+  uint32_t v8 = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[1] * b[8];
+  t += (uint64_t)a[2] * b[7];
+  t += (uint64_t)a[3] * b[6];
+  t += (uint64_t)a[4] * b[5];
+  t += (uint64_t)a[5] * b[4];
+  t += (uint64_t)a[6] * b[3];
+  t += (uint64_t)a[7] * b[2];
+  t += (uint64_t)a[8] * b[1];
+  t += (uint64_t)v1 * (uint64_t)p8;
+  c[0] = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[2] * b[8];
+  t += (uint64_t)a[3] * b[7];
+  t += (uint64_t)a[4] * b[6];
+  t += (uint64_t)a[5] * b[5];
+  t += (uint64_t)a[6] * b[4];
+  t += (uint64_t)a[7] * b[3];
+  t += (uint64_t)a[8] * b[2];
+  t += (uint64_t)v2 * (uint64_t)p8;
+  c[1] = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[3] * b[8];
+  t += (uint64_t)a[4] * b[7];
+  t += (uint64_t)a[5] * b[6];
+  t += (uint64_t)a[6] * b[5];
+  t += (uint64_t)a[7] * b[4];
+  t += (uint64_t)a[8] * b[3];
+  t += (uint64_t)v3 * (uint64_t)p8;
+  c[2] = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[4] * b[8];
+  t += (uint64_t)a[5] * b[7];
+  t += (uint64_t)a[6] * b[6];
+  t += (uint64_t)a[7] * b[5];
+  t += (uint64_t)a[8] * b[4];
+  t += (uint64_t)v4 * (uint64_t)p8;
+  c[3] = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[5] * b[8];
+  t += (uint64_t)a[6] * b[7];
+  t += (uint64_t)a[7] * b[6];
+  t += (uint64_t)a[8] * b[5];
+  t += (uint64_t)v5 * (uint64_t)p8;
+  c[4] = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[6] * b[8];
+  t += (uint64_t)a[7] * b[7];
+  t += (uint64_t)a[8] * b[6];
+  t += (uint64_t)v6 * (uint64_t)p8;
+  c[5] = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[7] * b[8];
+  t += (uint64_t)a[8] * b[7];
+  t += (uint64_t)v7 * (uint64_t)p8;
+  c[6] = ((uint32_t)t & mask);
+  t >>= 29;
+  t += (uint64_t)a[8] * b[8];
+  t += (uint64_t)v8 * (uint64_t)p8;
+  c[7] = ((uint32_t)t & mask);
+  t >>= 29;
+  c[8] = (uint32_t)t;
+}
+
+uint32_t prop32 (uint32_t *n) {
+  int i;
+  uint32_t mask = ((uint32_t)1 << 29u) - (uint32_t)1;
+  int32_t carry = (int32_t)n[0];
+  carry >>= 29u;
+  n[0] &= mask;
+  for (i = 1; i < 8; i++) {
+    carry += (int32_t)n[i];
+    n[i] = (uint32_t)carry & mask;
+    carry >>= 29u;
+  }
+  n[8] += (uint32_t)carry;
+  return -((n[8] >> 1) >> 30u);
+}
+
+int flatten32(uint32_t *n) {
+  uint32_t carry = prop32(n);
+  n[0] -= (uint32_t)1u & carry;
+  n[8] += ((uint32_t)0x50000u) & carry;
+  (void)prop32(n);
+  return (int)(carry & 1);
+}
+
+int modfsb32(uint32_t *n) {
+  n[0] += (uint32_t)1u;
+  n[8] -= (uint32_t)0x50000u;
+  return flatten32(n);
+}
+
+void redc32(uint32_t *n, uint32_t *m) {
+  int i;
+  uint32_t c[9];
+  c[0] = 1;
+  for (i = 1; i < 9; i++) {
+    c[i] = 0;
+  }
+  modmul32(n, c, m);
+  (void)modfsb32(m);
+}
+
+uint32_t fp_is_zero_32(uint32_t* p){
+  uint32_t c[9], d = 0;
+  redc32(p, c);
+  for (int i = 0; i < 9; i++) {
+    d |= c[i];
+  }
+  return -(uint32_t)((uint32_t)1 & ((d - (uint32_t)1) >> 29u));
+}
+
+uint32x4_t theta_point_is_zero(const uint32x4_t* a){
+    uint32x4_t mask = (uint32x4_t)vdupq_n_s32(-1);
+    uint32x4_t zero = vdupq_n_u32(0);
+    uint32x4_t qlow = vdupq_n_u32((1<<PER_LIMB)-1);
+    uint32x4_t qhigh = vdupq_n_u32(MASK_VALUE-1);
+    uint32x4_t tmp;
+    
+    for(int i = 0;i<(FP_LIMBS-1);i++){
+        tmp = vorrq_u32(vceqq_u32(a[i], qlow), vceqq_u32(a[i], zero));
+        mask = vandq_u32(mask, tmp);
+    }
+    tmp = vorrq_u32(vceqq_u32(a[FP_LIMBS-1], qhigh), vceqq_u32(a[FP_LIMBS-1], zero));
+    return vandq_u32(mask, tmp);
+}

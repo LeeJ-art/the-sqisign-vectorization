@@ -40,8 +40,9 @@ ec_eval_even_strategy(ec_curve_t *curve,
             // if we copied from the very first element, then we perform one additional doubling
             unsigned num_dbls = todo[current - 1] / 4 * 2 + todo[current - 1] % 2;
             todo[current] = todo[current - 1] - num_dbls;
-            while (num_dbls--)
+            while (num_dbls--){
                 xDBL_A24(&splits[current], &splits[current], &A24, false);
+            }
         }
 
         if (j == 0) {

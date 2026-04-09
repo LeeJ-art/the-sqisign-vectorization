@@ -33,21 +33,6 @@ fp2_set_zero(fp2_t *x)
     fp_set_zero(&(x->im));
 }
 
-uint32x4_t theta_point_is_zero(const uint32x4_t* a){
-    uint32x4_t mask = (uint32x4_t)vdupq_n_s32(-1);
-    uint32x4_t zero = vdupq_n_u32(0);
-    uint32x4_t qlow = vdupq_n_u32((1<<29)-1);
-    uint32x4_t qhigh = vdupq_n_u32((5<<16)-1);
-    uint32x4_t tmp;
-    
-    for(int i = 0;i<8;i++){
-        tmp = vorrq_u32(vceqq_u32(a[i], qlow), vceqq_u32(a[i], zero));
-        mask = vandq_u32(mask, tmp);
-    }
-    tmp = vorrq_u32(vceqq_u32(a[8], zero), vceqq_u32(a[8], qhigh));
-    return vandq_u32(mask, tmp);
-}
-
 // Is a GF(p^2) element zero?
 // Returns 0xFF...FF (true) if a=0, 0 (false) otherwise
 uint32_t
@@ -344,178 +329,266 @@ fp2_cswap(fp2_t *a, fp2_t *b, uint32_t ctl)
     fp_cswap(&(a->im), &(b->im), ctl);
 }
 
+// Vectorization
 uint32_t fp2_is_zero_32(const uint32x4_t* p, int x){
-  uint32_t a[18];
-  for (int i = 0; i < 18; i++) a[i] = p[i][x];
-  return fp_is_zero_32(a) & fp_is_zero_32(a+9);
+  uint32_t a[FP2_LIMBS];
+  for (int i = 0; i < FP2_LIMBS; i++) a[i] = p[i][x];
+  return fp_is_zero_32(a) & fp_is_zero_32(a+FP_LIMBS);
 }
 
+void fp2_bactched_reduction(uint32x4_t *out){
+    fp_bactched_reduction(out);
+    fp_bactched_reduction(out+FP_LIMBS);
+}
 
 void fp2_add_batched(uint32x4_t* out, uint32x4_t *a, uint32x4_t *b){
-    // for (int i=0; i<9; i++){
-    //     out[i] = vaddq_u32(a[i], b[i]);
-    //     out[i+9] = vaddq_u32(a[i+9], b[i+9]);
-    // }
-    __fp2_add_batched_asm(out, a, b);
-
+    fp_add_batched(out, a, b);
+    fp_add_batched(out+FP_LIMBS, a+FP_LIMBS, b+FP_LIMBS);
     // reduce
-    // prop_2(out);
-    // prop_2(out+9);
-
-    // uint32x4_t reCarry = div5(out+8), imCarry = div5(out+17);
-
-    // out[0] = vaddq_u32(out[0], reCarry);
-    // out[9] = vaddq_u32(out[9], imCarry);
-
-    // prop_2(out);
-    // prop_2(out+9);
+    //fp2_bactched_reduction(out);
 }
 
 void fp2_sub_batched(uint32x4_t* out, uint32x4_t *a, uint32x4_t *b){
-    uint32x4_t q[9], tmp[9];
-    for(int i = 0;i<8;i++) q[i] = vdupq_n_u32(0x3FFFFFFE);
-    q[8] = vdupq_n_u32(0x9FFFE);
-    
-    for (int i=0; i<9; i++){
-        tmp[i] = vaddq_u32(a[i], q[i]);
-        out[i] = vsubq_u32(tmp[i], b[i]);
-
-        tmp[i] = vaddq_u32(a[i+9], q[i]);
-        out[i+9] = vsubq_u32(tmp[i], b[i+9]);
-    }
-
-    //reduce
-    // prop_2(out);
-    // prop_2(out+9);
-
-    // uint32x4_t reCarry = div5(out+8), imCarry = div5(out+17);
-
-    // out[0] = vaddq_u32(out[0], reCarry);
-    // out[9] = vaddq_u32(out[9], imCarry);
-
-    // prop_2(out);
-    // prop_2(out+9);
-}
-
-//1x
-void to_squared_theta_batched(uint32x4_t *out, uint32x4_t *a){
-    uint32x4_t tmp[18] = {0}, q2[9] = {0}, dummy[9];
-    for(int i = 0;i<8;i++) q2[i] = vdupq_n_u32(0x3FFFFFFE);
-    q2[8] = vdupq_n_u32(0x9FFFE);
-
-    // tmp0 = real + img
-    for(int i = 0;i<9;i++) tmp[i] = vaddq_u32(a[i], a[i+9]);
-
-    // tmp1 = real - img
-    for(int i = 0;i<9;i++){
-        dummy[i] = vaddq_u32(q2[i], a[i]);
-        tmp[i+9] = vsubq_u32(dummy[i], a[i+9]);
-    }
-
-    // img = img + img
-    for(int i = 0;i<9;i++) dummy[i] = vaddq_u32(a[i+9], a[i+9]);
-
-    // img = real * img
-    //fp_mul_batched((uint32x2_t*) out+18, a, dummy);
-    __fp_mul_asm((uint32x2_t*) out+18, a, dummy);
-
-    // real = tmp0 * tmp1
-    //fp_mul_batched((uint32x2_t*) out, tmp, tmp+9);
-    __fp_mul_asm((uint32x2_t*) out, tmp, tmp+9);
-
-    for(int i = 0;i<18;i++){
-      tmp[0][0] = out[i][0] + out[i][1];
-      tmp[0][1] = (out[i][0] + q2[i%9][0]) - out[i][1];
-      tmp[0][2] = out[i][2] + out[i][3];
-      tmp[0][3] = (out[i][2] + q2[i%9][0]) - out[i][3];
-
-      out[i][0] = tmp[0][0] + tmp[0][2];
-      out[i][1] = tmp[0][1] + tmp[0][3];
-      out[i][2] = tmp[0][0] + (q2[i%9][0] - tmp[0][2]);
-      out[i][3] = tmp[0][1] + (q2[i%9][0] - tmp[0][3]);
-    }
-
+    fp_sub_batched(out, a, b);
+    fp_sub_batched(out+FP_LIMBS, a+FP_LIMBS, b+FP_LIMBS);
     // reduce
-    prop_2(out);
-    prop_2(out+9);
-
-    uint32x4_t reCarry = div5(out+8), imCarry = div5(out+17);
-
-    out[0] = vaddq_u32(out[0], reCarry);
-    out[9] = vaddq_u32(out[9], imCarry);
+    //fp2_bactched_reduction(out);
 }
 
-//1x, [real, img] = [4 29-bit, 5 29-bit]
 void fp2_mul_batched(uint32x4_t *out, uint32x4_t *a, uint32x4_t *b){
-    uint32x4_t tmp[18], q[9] = {0};
-    for(int i = 0;i<8;i++) q[i] = vdupq_n_u32(0x3FFFFFFE);
-    q[8] = vdupq_n_u32(0x9FFFE);
+    uint32x4_t tmp[FP2_LIMBS];
+    uint32x4_t ain[FP2_LIMBS], bin[FP2_LIMBS];
+    memmove(ain, a, sizeof(uint32x4_t)*FP2_LIMBS);
+    memmove(bin, b, sizeof(uint32x4_t)*FP2_LIMBS);
 
     // tmp_a = a_re + a_im
-    for(int i = 0;i<9;i++) tmp[i] = vaddq_u32(a[i], a[i+9]);
+    fp_add_batched(tmp, ain, ain+FP_LIMBS);
     // tmp_b = b_re + b_im
-    for(int i = 0;i<9;i++) tmp[i+9] = vaddq_u32(b[i], b[i+9]);
-    // c1
-    //fp_mul_batched((uint32x2_t*)tmp, tmp, tmp+9);
-    __fp_mul_asm((uint32x2_t*)tmp, tmp, tmp+9);
-    // c2
-    //fp_mul_batched(((uint32x2_t*)tmp)+18, a+9, b+9);
-    __fp_mul_asm(((uint32x2_t*)tmp)+18, a+9, b+9);
-    // c0
-    //fp_mul_batched((uint32x2_t*)out, a, b);
-    __fp_mul_asm((uint32x2_t*)out, a, b);
-    
-    for(int i = 0;i<9;i++){
-        out[i+9] = vaddq_u32(tmp[i], q[i]);
-        tmp[i] = vaddq_u32(tmp[i+9], out[i]);
-        out[i+9] = vsubq_u32(out[i+9], tmp[i]);
-        
-        out[i] = vaddq_u32(out[i], q[i]);
-        out[i] = vsubq_u32(out[i], tmp[i+9]);
-    }
+    fp_add_batched(tmp+FP_LIMBS, bin, bin+FP_LIMBS);
+
+    // c1 = tmp_a * tmp_b
+    fp_mul_batched(((uint32x2_t*)out)+FP2_LIMBS, tmp, tmp+FP_LIMBS);
+
+    // c2 = a_im * b_im
+    fp_mul_batched(((uint32x2_t*)tmp)+FP2_LIMBS, ain+FP_LIMBS, bin+FP_LIMBS);
+
+    // c0 = a_re * b_re
+    fp_mul_batched((uint32x2_t*)out, ain, bin);
+
+    //c1 = (a0*b1) + (a1*b0) = (a0+a1)*(b0+b1) - [(a0*b0)+(a1*b1)]
+    fp_add_batched(tmp, out, tmp+FP_LIMBS);
+    fp_sub_batched(out+FP_LIMBS, out+FP_LIMBS, tmp);
+
+    //c0 = (a0*b0) - (a1*b1)
+    fp_sub_batched(out, out, tmp+FP_LIMBS);
+
     //reduce
-    prop_2(out);
-    prop_2(out+9);
-
-    uint32x4_t reCarry = div5(out+8), imCarry = div5(out+17);
-
-    out[0] = vaddq_u32(out[0], reCarry);
-    out[9] = vaddq_u32(out[9], imCarry);
-
-    // prop_2(out);
-    // prop_2(out+9);
+    fp2_bactched_reduction(out);
 }
 
-// 1x
-void fp2_sqr_batched(uint32x4_t* b, uint32x4_t *a){
-    uint32x4_t tmp[18] = {0}, q[9] = {0};
-    for(int i = 0;i<8;i++) q[i] = vdupq_n_u32(0x3FFFFFFE);
-    q[8] = vdupq_n_u32(0x9FFFE);
+void fp2_sqr_batched(uint32x4_t* out, uint32x4_t *a){
+    uint32x4_t tmp[FP2_LIMBS];
+    uint32x4_t ain[FP2_LIMBS];
+    memmove(ain, a, sizeof(uint32x4_t)*FP2_LIMBS);
 
     // tmp0 = real + img
-    for(int i = 0;i<9;i++) tmp[i] = vaddq_u32(a[i], a[i+9]);
+    fp_add_batched(tmp, ain, ain+FP_LIMBS);
 
     // tmp1 = real - img
-    for(int i = 0;i<9;i++){
-        q[i] = vaddq_u32(q[i], a[i]);
-        tmp[i+9] = vsubq_u32(q[i], a[i+9]);
-    }
+    fp_sub_batched(tmp+FP_LIMBS, ain, ain+FP_LIMBS);
+
+    //c0 = (a0*a0) - (a1*a1)
+    fp_mul_batched((uint32x2_t*)out, tmp, tmp+FP_LIMBS);
 
     // img = img + img
-    //for(int i = 0;i<9;i++) a[i+9] = vaddq_u32(a[i+9], a[i+9]);
-    for(int i = 0;i<9;i++) q[i] = vaddq_u32(a[i+9], a[i+9]);
+    fp_add_batched(tmp, ain+FP_LIMBS, ain+FP_LIMBS);
 
-    // img = real * img
-    //fp_mul_batched((uint32x2_t*) b+18, a, q);
-    __fp_mul_asm((uint32x2_t*) b+18, a, q);
+    //c1 = (a0*a1) + (a1*a0) = a0 * (2*a1)
+    fp_mul_batched(((uint32x2_t*)out)+FP2_LIMBS, ain, tmp);
+}
 
-    // real = tmp0 * tmp1
-    //fp_mul_batched((uint32x2_t*) b, tmp, tmp+9);
-    __fp_mul_asm((uint32x2_t*) b, tmp, tmp+9);
+void fp2_sqrt_vec_batched_2(uint32x4_t *out, uint32x4_t *in)
+{    
+    uint32x4_t m1[FP_LIMBS] ={0}, m2[FP_LIMBS] = {0}, a32[FP_LIMBS] = {0}, b32[FP_LIMBS] = {0}, x32[FP_LIMBS] = {0};
+    /* From "Optimized One-Dimensional SQIsign Verification on Intel and
+     * Cortex-M4" by Aardal et al: https://eprint.iacr.org/2024/1563 */
+
+    // x0 = \delta = sqrt(a0^2 + a1^2)
+    // fp_sqr(&x0, &(a->re));
+    // fp_sqr(&p0, &(b->re));
+    // fp_sqr(&x1, &(a->im));
+    // fp_sqr(&p1, &(b->im));
+    for (int i=0; i<FP_LIMBS; i++){
+        m1[i][0] = in[i][0];
+        m1[i][1] = in[i][1];
+        m1[i][2] = in[i+FP_LIMBS][0];
+        m1[i][3] = in[i+FP_LIMBS][1];
+    }
+    fp_sqr_batched((uint32x2_t*)x32, m1);
+
+    // fp_add(&x0, &x0, &x1);
+    // fp_add(&p0, &p0, &p1);
+    for (int i=0; i<FP_LIMBS; i++){
+        m2[i][0] = x32[i][2];
+        m2[i][1] = x32[i][3];
+        a32[i] = vaddq_u32(x32[i], m2[i]);
+    }
+    
+    // fp_sqrt(&x0);
+    // fp_sqrt(&p0);
+    fp_sqrt_batched(a32, a32);
+    
+    // If a1 = 0, there is a risk of \delta = -a0, which makes x0 = 0 below.
+    // In that case, we restore the value \delta = a0.
+    // fp_select(&x0, &x0, &(a->re), fp_is_zero(&(a->im)));
+    // fp_select(&p0, &p0, &(b->re), fp_is_zero(&(b->im)));
+    for (int i=0; i<FP_LIMBS; i++){
+        m2[i][0] = in[i+FP_LIMBS][0];
+        m2[i][1] = in[i+FP_LIMBS][1];
+        m2[i][2] = m2[i][3] = 0;
+    }
+    uint32x4_t zero_flag = theta_point_is_zero(m2);
+    for (int i=0; i<FP_LIMBS; i++){
+        a32[i] = veorq_u32(a32[i], vandq_u32(zero_flag, veorq_u32(a32[i], m1[i])));
+    }
+
+    // x0 = \delta + a0, t0 = 2 * x0.
+    // fp_add(&x0, &x0, &(a->re));
+    // fp_add(&p0, &p0, &(b->re));
+    for (int i=0; i<FP_LIMBS; i++){
+        a32[i] = vaddq_u32(a32[i], m1[i]);
+    }
+    fp_bactched_reduction(a32);
+    
+    // fp_add(&t0, &x0, &x0);
+    // fp_add(&q0, &p0, &p0);
+    for (int i=0; i<FP_LIMBS; i++){
+        b32[i] = vaddq_u32(a32[i], a32[i]);
+        b32[i][2] = b32[i][3] = 0;
+    }
+    fp_bactched_reduction(b32);
+
+    // x1 = t0^(p-3)/4
+    // fp_exp3div4(&x1, &t0);
+    // fp_exp3div4(&p1, &q0);
+    fp_exp3div4_vec(m2, b32);
+    for (int i=0; i<FP_LIMBS; i++){
+        m2[i][2] = m1[i][2];
+        m2[i][3] = m1[i][3];
+    }
+
+    // x0 = x0 * x1, x1 = x1 * a1, t1 = (2x0)^2.
+    // fp_mul(&x0, &x0, &x1);
+    // fp_mul(&p0, &p0, &p1);
+    // fp_mul(&x1, &x1, &(a->im));
+    // fp_mul(&p1, &p1, &(b->im));
+    for (int i=0; i<FP_LIMBS; i++){
+        x32[i][0] = a32[i][0];
+        x32[i][1] = a32[i][1];
+        x32[i][2] = m2[i][0];
+        x32[i][3] = m2[i][1];
+    }
+    fp_mul_batched((uint32x2_t *)x32, x32, m2);
+
+    // fp_add(&t1, &x0, &x0);
+    // fp_add(&q1, &p0, &p0);
+    for (int i=0; i<FP_LIMBS; i++){
+        a32[i] = vaddq_u32(x32[i], x32[i]);
+    }
+    
+    // fp_sqr(&t1, &t1);
+    // fp_sqr(&q1, &q1);
+    fp_sqr_batched((uint32x2_t *)a32, a32);
+
+    // If t1 = t0, return x0 + x1*i, otherwise x1 - x0*i.
+    // fp_sub(&t0, &t0, &t1);
+    // fp_sub(&q0, &q0, &q1);
+    // fp_neg(&t1, &x0);
+    // fp_neg(&q1, &p0);
+    for (int i=0; i<FP_LIMBS; i++){
+        a32[i][2] = x32[i][0];
+        a32[i][3] = x32[i][1];
+    }
+    fp_sub_batched(a32, b32, a32);
+    fp_bactched_reduction(a32);
+
+    // uint32_t f = fp_is_zero(&t0);
+    // uint32_t g = fp_is_zero(&q0);
+    zero_flag = theta_point_is_zero(a32);
+    zero_flag[2] = zero_flag[0];
+    zero_flag[3] = zero_flag[1];
+
+    // fp_copy(&t0, &x1);
+    // fp_copy(&q0, &p1);
+    // fp_select(&t0, &t0, &x0, f);
+    // fp_select(&q0, &q0, &p0, g);
+    // fp_select(&t1, &t1, &x1, f);
+    // fp_select(&q1, &q1, &p1, g);
+    for (int i=0; i<FP_LIMBS; i++){
+        a32[i][0] = x32[i][2];
+        a32[i][1] = x32[i][3];
+        a32[i] = veorq_u32(a32[i], vandq_u32(zero_flag, veorq_u32(a32[i], x32[i])));
+    }
+
+    // Check if t0 is zero
+    // uint32_t t0_is_zero = fp_is_zero(&t0);
+    // uint32_t q0_is_zero = fp_is_zero(&q0);
+    for (int i=0; i<FP_LIMBS; i++){
+        m1[i] = vdupq_n_u32(0);
+    }
+    zero_flag = theta_point_is_zero(a32);
+
+    // Check whether t0, t1 are odd
+    // Note: we encode to ensure canonical representation
+    // int8_t tmp_bytes[FP_ENCODED_BYTES];
+    // fp_encode(tmp_bytes, &t0);
+    // uint32_t t0_is_odd = -((uint32_t)tmp_bytes[0] & 1);
+    // fp_encode(tmp_bytes, &q0);
+    // uint32_t q0_is_odd = -((uint32_t)tmp_bytes[0] & 1);
+    // fp_encode(tmp_bytes, &t1);
+    // uint32_t t1_is_odd = -((uint32_t)tmp_bytes[0] & 1);
+    // fp_encode(tmp_bytes, &q1);
+    // uint32_t q1_is_odd = -((uint32_t)tmp_bytes[0] & 1);
+    m1[0] = vdupq_n_u32(1);
+    fp_mul_batched((uint32x2_t *)m2, a32, m1);
+    m1[0] = -(vandq_u32(m2[0], m1[0]));
+
+    // We negate the output if:
+    // t0 is odd, or
+    // t0 is zero and t1 is odd
+    // uint32_t negate_output = t0_is_odd | (t0_is_zero & t1_is_odd);
+    // uint32_t negate_output2 = q0_is_odd | (q0_is_zero & q1_is_odd);
+    zero_flag[0] = (m1[0][0] | (zero_flag[0] & m1[0][2]));
+    zero_flag[1] = (m1[0][1] | (zero_flag[1] & m1[0][3]));
+    zero_flag[2] = zero_flag[0];
+    zero_flag[3] = zero_flag[1];
+
+    // fp_neg(&x0, &t0);
+    // fp_neg(&p0, &q0);
+    // fp_neg(&x1, &t1);
+    // fp_neg(&p1, &q1);
+    fp_neg_vec(x32, a32);
+
+    // fp_select(&(a->re), &t0, &x0, negate_output);
+    // fp_select(&(b->re), &q0, &p0, negate_output2);
+    // fp_select(&(a->im), &t1, &x1, negate_output);
+    // fp_select(&(b->im), &q1, &p1, negate_output2);
+    for (int i=0; i<FP_LIMBS; i++){
+        a32[i] = veorq_u32(a32[i], vandq_u32(zero_flag, veorq_u32(a32[i], x32[i])));
+    }
+
+    for (int i=0; i<FP_LIMBS; i++){
+        out[i][0]   = a32[i][0];
+        out[i+FP_LIMBS][0] = a32[i][2];
+        out[i][1]   = a32[i][1];
+        out[i+FP_LIMBS][1] = a32[i][3];
+    }
+
+    return;
 }
 
 void fp2_select_vec(uint32x4_t* out, uint32x4_t* in, uint32x4_t ctl_vec){
-    for (int i=0; i<9; i++){
-        out[i] = veorq_u32(in[i], vandq_u32(ctl_vec, veorq_u32(in[i], in[i+9])));
+    for (int i=0; i<FP_LIMBS; i++){
+        out[i] = veorq_u32(in[i], vandq_u32(ctl_vec, veorq_u32(in[i], in[i+FP_LIMBS])));
     }
 }
